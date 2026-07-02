@@ -1151,6 +1151,7 @@ static CommandLineParam paramsForStartup[] =
 	{ "-headless", parseHeadless },
 
 #if RTS_BUILD_AGENT_BRIDGE
+	// TheSuperHackers @feature agentbridge Enables the AgentBridge external control server.
 	{ "-agentbridge", parseAgentBridge },
 #endif
 
