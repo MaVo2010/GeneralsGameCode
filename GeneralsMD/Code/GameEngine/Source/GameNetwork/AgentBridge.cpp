@@ -5,6 +5,14 @@
 #include "GameNetwork/AgentBridge.h"
 #include "Common/GlobalData.h"
 #include "GameLogic/GameLogic.h"
+// TheSuperHackers @feature agentbridge observation serializer includes (M1)
+#include "Common/PlayerList.h"
+#include "Common/Player.h"
+#include "Common/Money.h"
+#include "Common/Energy.h"
+#include "GameLogic/Object.h"
+#include "GameLogic/Module/AIUpdate.h"
+#include "Common/ThingTemplate.h"
 #include <winsock.h>
 
 AgentBridge* TheAgentBridge = NULL;
@@ -13,7 +21,8 @@ static Bool s_winsockUp = FALSE;
 
 AgentBridge::AgentBridge()
 	: m_listenSock(~0u), m_clientSock(~0u), m_framesPerStep(5),
-	  m_framesSinceStep(0), m_awaitingFirstStep(TRUE) {}
+	  m_framesSinceStep(0), m_awaitingFirstStep(TRUE),
+	  m_agentPlayerIndex(-1) {}
 
 AgentBridge::~AgentBridge() { closeClient();
 	if (m_listenSock != ~0u) { closesocket((SOCKET)m_listenSock); m_listenSock = ~0u; }
@@ -93,12 +102,63 @@ Bool AgentBridge::sendJson(const AsciiString& json) {
 	return sendAll((SOCKET)m_clientSock, json.str(), (int)len);
 }
 
-// M0 stubs — completed in M1/M2:
+// TheSuperHackers @feature agentbridge observation serializer (M1)
+// Carries userData (output buffer + which player's view to shroud-filter against)
+// through Player::iterateObjects()'s C-style callback.
+struct ObsBuilder { AsciiString* out; Int viewerIndex; Bool wantEnemies; Bool first; };
+
+static void appendUnitJson(Object* obj, void* ud) {
+	ObsBuilder* b = (ObsBuilder*)ud;
+	if (obj == NULL) return;
+	if (b->wantEnemies) {
+		ObjectShroudStatus s = obj->getShroudedStatus(b->viewerIndex);
+		if (s != OBJECTSHROUD_CLEAR && s != OBJECTSHROUD_PARTIAL_CLEAR) return;
+	}
+	const Coord3D* p = obj->getPosition();
+	Real hp = 0.0f, maxhp = 0.0f;
+	if (obj->getBodyModule()) { hp = obj->getBodyModule()->getHealth(); maxhp = obj->getBodyModule()->getMaxHealth(); }
+	AIUpdateInterface* ai = obj->getAIUpdateInterface();
+	const char* kind = obj->getTemplate() ? obj->getTemplate()->getName().str() : "";
+	AsciiString entry;
+	entry.format("%s{\"id\":%u,\"kind\":\"%s\",\"pos\":[%.1f,%.1f,%.1f],\"hp\":%.0f,\"maxhp\":%.0f,\"moving\":%s}",
+		b->first ? "" : ",", (unsigned int)obj->getID(), kind, p->x, p->y, p->z, hp, maxhp,
+		(ai && ai->isMoving()) ? "true" : "false");
+	b->out->concat(entry);
+	b->first = FALSE;
+}
+
+// M1: full observation — agent player's units, shroud-filtered enemy units, resources.
 AsciiString AgentBridge::buildObservation() {
-	AsciiString s;
-	s.format("{\"schema\":0,\"frame\":%u,\"done\":false}",
-		TheGameLogic ? TheGameLogic->getFrame() : 0);
-	return s;
+	Player* agent = (m_agentPlayerIndex < 0)
+		? ThePlayerList->getLocalPlayer()
+		: ThePlayerList->getNthPlayer(m_agentPlayerIndex);
+	Int viewer = agent ? agent->getPlayerIndex() : 0;
+
+	AsciiString out;
+	AsciiString head;
+	head.format("{\"schema\":0,\"frame\":%u,\"player\":{\"id\":%d,\"money\":%u,\"power_produced\":%d,\"power_used\":%d},",
+		TheGameLogic ? TheGameLogic->getFrame() : 0, viewer,
+		agent ? agent->getMoney()->countMoney() : 0,
+		agent ? agent->getEnergy()->getProduction() : 0,
+		agent ? agent->getEnergy()->getConsumption() : 0);
+	out.concat(head);
+
+	out.concat("\"self_units\":[");
+	if (agent) { ObsBuilder sb = { &out, viewer, FALSE, TRUE }; agent->iterateObjects(appendUnitJson, &sb); }
+	out.concat("],\"visible_enemies\":[");
+	Bool firstEnemy = TRUE;
+	for (Int i = 0; i < ThePlayerList->getPlayerCount(); ++i) {
+		Player* p = ThePlayerList->getNthPlayer(i);
+		if (!p || p == agent) continue;
+		ObsBuilder eb = { &out, viewer, TRUE, firstEnemy };
+		p->iterateObjects(appendUnitJson, &eb);
+		firstEnemy = eb.first; // preserve comma state across players
+	}
+	AsciiString tail;
+	tail.format("],\"map\":{\"width\":%.0f,\"height\":%.0f},\"last_action\":{\"accepted\":true,\"reason\":\"\"},\"done\":false}",
+		TheGameLogic ? TheGameLogic->getWidth() : 0.0f, TheGameLogic ? TheGameLogic->getHeight() : 0.0f);
+	out.concat(tail);
+	return out;
 }
 void AgentBridge::applyActions(const AsciiString& /*actionsJson*/) { /* M2 */ }
 

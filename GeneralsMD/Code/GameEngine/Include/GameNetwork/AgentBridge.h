@@ -37,6 +37,7 @@ private:
 	Int m_framesPerStep;         // logic frames advanced per step()
 	Int m_framesSinceStep;       // counter toward m_framesPerStep
 	Bool m_awaitingFirstStep;    // true until the client's first step/reset
+	Int m_agentPlayerIndex;      // TheSuperHackers @feature agentbridge which player the agent controls; -1 = local player
 };
 
 extern AgentBridge* TheAgentBridge;
