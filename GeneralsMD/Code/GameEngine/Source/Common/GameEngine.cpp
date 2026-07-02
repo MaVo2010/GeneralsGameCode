@@ -923,8 +923,24 @@ void GameEngine::update()
 			}
 		}
 
+#if RTS_BUILD_AGENT_BRIDGE
+		// TheSuperHackers @feature agentbridge synchronous step: blocks at step
+		// boundaries (send observation, wait for + apply the client's action).
+		// Returns TRUE only while actively controlling (client connected + in game).
+		Bool agentControlling = FALSE;
+		if (TheAgentBridge && TheAgentBridge->isActive())
+			agentControlling = TheAgentBridge->preLogicSync();
+#endif
+
 		const Bool canUpdate = canUpdateGameLogic(FramePacer::IgnoreFrozenTime | FramePacer::IgnoreHaltedGame);
-		const Bool canUpdateLogic = canUpdate && !TheFramePacer->isGameHalted() && !TheFramePacer->isTimeFrozen();
+		Bool canUpdateLogic = canUpdate && !TheFramePacer->isGameHalted() && !TheFramePacer->isTimeFrozen();
+#if RTS_BUILD_AGENT_BRIDGE
+		// TheSuperHackers @feature agentbridge when the bridge is controlling, force
+		// exactly one logic frame this iteration (bypassing the frame pacer) so the
+		// game advances N frames back-to-back per step().
+		if (agentControlling)
+			canUpdateLogic = !TheFramePacer->isGameHalted() && !TheFramePacer->isTimeFrozen();
+#endif
 		const Bool canUpdateScript = canUpdate && !TheFramePacer->isGameHalted();
 
 		if (canUpdateLogic)
