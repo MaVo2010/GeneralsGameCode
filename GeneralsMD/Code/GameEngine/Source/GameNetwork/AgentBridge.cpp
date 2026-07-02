@@ -93,19 +93,29 @@ Bool AgentBridge::recvJson(AsciiString& out) {
 	buf[len] = 0; out = buf; free(buf); return TRUE;
 }
 
-Bool AgentBridge::sendJson(const AsciiString& json) {
+// TheSuperHackers @feature agentbridge raw length-prefixed send; both AsciiString and the
+// std::string observation buffer (unbounded, unlike AsciiString) funnel through here.
+Bool AgentBridge::sendJson(const char* data, unsigned int len) {
 	if (m_clientSock == ~0u) return FALSE;
-	unsigned int len = (unsigned int)json.getLength();
 	unsigned char hdr[4] = { (unsigned char)(len>>24),(unsigned char)(len>>16),
 	                         (unsigned char)(len>>8),(unsigned char)(len) };
 	if (!sendAll((SOCKET)m_clientSock, (char*)hdr, 4)) { closeClient(); return FALSE; }
-	return sendAll((SOCKET)m_clientSock, json.str(), (int)len);
+	// TheSuperHackers @feature agentbridge close on payload-send failure too (was a latent trap: only the header path did)
+	if (!sendAll((SOCKET)m_clientSock, data, (int)len)) { closeClient(); return FALSE; }
+	return TRUE;
+}
+
+Bool AgentBridge::sendJson(const AsciiString& json) {
+	return sendJson(json.str(), (unsigned int)json.getLength());
 }
 
 // TheSuperHackers @feature agentbridge observation serializer (M1)
-// Carries userData (output buffer + which player's view to shroud-filter against)
-// through Player::iterateObjects()'s C-style callback.
-struct ObsBuilder { AsciiString* out; Int viewerIndex; Bool wantEnemies; Bool first; };
+// Carries userData (output buffer + which player's view to shroud-filter against,
+// plus the owning player's index for enemy entries) through Player::iterateObjects()'s
+// C-style callback. `out` is std::string: AsciiString is capped at MAX_LEN (32767,
+// asserted) and wraps structurally past 64K (unsigned short m_numCharsAllocated) —
+// large armies would overflow it, so the accumulator must be unbounded.
+struct ObsBuilder { std::string* out; Int viewerIndex; Bool wantEnemies; Bool first; Int ownerIndex; };
 
 static void appendUnitJson(Object* obj, void* ud) {
 	ObsBuilder* b = (ObsBuilder*)ud;
@@ -120,44 +130,60 @@ static void appendUnitJson(Object* obj, void* ud) {
 	AIUpdateInterface* ai = obj->getAIUpdateInterface();
 	const char* kind = obj->getTemplate() ? obj->getTemplate()->getName().str() : "";
 	AsciiString entry;
-	entry.format("%s{\"id\":%u,\"kind\":\"%s\",\"pos\":[%.1f,%.1f,%.1f],\"hp\":%.0f,\"maxhp\":%.0f,\"moving\":%s}",
-		b->first ? "" : ",", (unsigned int)obj->getID(), kind, p->x, p->y, p->z, hp, maxhp,
-		(ai && ai->isMoving()) ? "true" : "false");
-	b->out->concat(entry);
+	if (b->wantEnemies) {
+		// TheSuperHackers @feature agentbridge owner field on visible_enemies entries (schema v0 review decision)
+		entry.format("%s{\"id\":%u,\"kind\":\"%s\",\"pos\":[%.1f,%.1f,%.1f],\"hp\":%.0f,\"maxhp\":%.0f,\"moving\":%s,\"player\":%d}",
+			b->first ? "" : ",", (unsigned int)obj->getID(), kind, p->x, p->y, p->z, hp, maxhp,
+			(ai && ai->isMoving()) ? "true" : "false", b->ownerIndex);
+	} else {
+		entry.format("%s{\"id\":%u,\"kind\":\"%s\",\"pos\":[%.1f,%.1f,%.1f],\"hp\":%.0f,\"maxhp\":%.0f,\"moving\":%s}",
+			b->first ? "" : ",", (unsigned int)obj->getID(), kind, p->x, p->y, p->z, hp, maxhp,
+			(ai && ai->isMoving()) ? "true" : "false");
+	}
+	b->out->append(entry.str());
 	b->first = FALSE;
 }
 
 // M1: full observation — agent player's units, shroud-filtered enemy units, resources.
-AsciiString AgentBridge::buildObservation() {
-	Player* agent = (m_agentPlayerIndex < 0)
-		? ThePlayerList->getLocalPlayer()
-		: ThePlayerList->getNthPlayer(m_agentPlayerIndex);
+std::string AgentBridge::buildObservation() {
+	// TheSuperHackers @feature agentbridge guard ThePlayerList: NULL -> agent stays NULL,
+	// self_units/visible_enemies both come out empty instead of a crash.
+	Player* agent = ThePlayerList
+		? ((m_agentPlayerIndex < 0) ? ThePlayerList->getLocalPlayer() : ThePlayerList->getNthPlayer(m_agentPlayerIndex))
+		: NULL;
 	Int viewer = agent ? agent->getPlayerIndex() : 0;
 
-	AsciiString out;
+	std::string out;
 	AsciiString head;
 	head.format("{\"schema\":0,\"frame\":%u,\"player\":{\"id\":%d,\"money\":%u,\"power_produced\":%d,\"power_used\":%d},",
 		TheGameLogic ? TheGameLogic->getFrame() : 0, viewer,
 		agent ? agent->getMoney()->countMoney() : 0,
 		agent ? agent->getEnergy()->getProduction() : 0,
 		agent ? agent->getEnergy()->getConsumption() : 0);
-	out.concat(head);
+	out.append(head.str());
 
-	out.concat("\"self_units\":[");
-	if (agent) { ObsBuilder sb = { &out, viewer, FALSE, TRUE }; agent->iterateObjects(appendUnitJson, &sb); }
-	out.concat("],\"visible_enemies\":[");
-	Bool firstEnemy = TRUE;
-	for (Int i = 0; i < ThePlayerList->getPlayerCount(); ++i) {
-		Player* p = ThePlayerList->getNthPlayer(i);
-		if (!p || p == agent) continue;
-		ObsBuilder eb = { &out, viewer, TRUE, firstEnemy };
-		p->iterateObjects(appendUnitJson, &eb);
-		firstEnemy = eb.first; // preserve comma state across players
+	out.append("\"self_units\":[");
+	if (agent) { ObsBuilder sb = { &out, viewer, FALSE, TRUE, -1 }; agent->iterateObjects(appendUnitJson, &sb); }
+	out.append("],\"visible_enemies\":[");
+	if (agent && ThePlayerList) {
+		Bool firstEnemy = TRUE;
+		for (Int i = 0; i < ThePlayerList->getPlayerCount(); ++i) {
+			Player* p = ThePlayerList->getNthPlayer(i);
+			if (!p || p == agent) continue;
+			// TheSuperHackers @feature agentbridge enemies-only filter (schema v0 review decision):
+			// visible_enemies must contain only objects of players in an ENEMIES relationship with
+			// the agent player. API: Player::getRelationship(const Team*) against the candidate
+			// player's default team (same idiom as AISkirmishPlayer::acquireEnemy / WeaponSet / etc).
+			if (agent->getRelationship(p->getDefaultTeam()) != ENEMIES) continue;
+			ObsBuilder eb = { &out, viewer, TRUE, firstEnemy, p->getPlayerIndex() };
+			p->iterateObjects(appendUnitJson, &eb);
+			firstEnemy = eb.first; // preserve comma state across players
+		}
 	}
 	AsciiString tail;
 	tail.format("],\"map\":{\"width\":%.0f,\"height\":%.0f},\"last_action\":{\"accepted\":true,\"reason\":\"\"},\"done\":false}",
 		TheGameLogic ? TheGameLogic->getWidth() : 0.0f, TheGameLogic ? TheGameLogic->getHeight() : 0.0f);
-	out.concat(tail);
+	out.append(tail.str());
 	return out;
 }
 void AgentBridge::applyActions(const AsciiString& /*actionsJson*/) { /* M2 */ }
@@ -176,7 +202,10 @@ Bool AgentBridge::preLogicSync() {
 	m_framesSinceStep++;
 	if (m_awaitingFirstStep || m_framesSinceStep >= m_framesPerStep) {
 		// Step boundary: report state, block for the next command, apply it.
-		if (!sendJson(buildObservation())) { closeClient(); return FALSE; }
+		// TheSuperHackers @feature agentbridge send the std::string observation via the raw
+		// length-prefixed overload (buildObservation() is unbounded, unlike AsciiString).
+		std::string obs = buildObservation();
+		if (!sendJson(obs.data(), (unsigned int)obs.size())) { closeClient(); return FALSE; }
 		AsciiString cmd;
 		if (!recvJson(cmd)) { closeClient(); return FALSE; }
 		applyActions(cmd);                                      // M2 injects orders here

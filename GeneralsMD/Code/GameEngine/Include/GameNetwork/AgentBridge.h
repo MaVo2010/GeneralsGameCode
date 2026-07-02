@@ -4,6 +4,8 @@
 
 #include "Common/SubsystemInterface.h"
 #include "Common/AsciiString.h"
+// TheSuperHackers @feature agentbridge std::string accumulator for buildObservation() (unbounded, unlike AsciiString)
+#include <string>
 
 class AgentBridge : public SubsystemInterface
 {
@@ -27,9 +29,13 @@ private:
 	Bool acceptClientIfWaiting();     // non-blocking accept
 	Bool recvJson(AsciiString& out);  // blocking, length-prefixed
 	Bool sendJson(const AsciiString& json);
+	// TheSuperHackers @feature agentbridge raw length-prefixed send; sendJson(AsciiString) delegates to this
+	Bool sendJson(const char* data, unsigned int len);
 	void closeClient();
 
-	AsciiString buildObservation();   // filled out in M1
+	// TheSuperHackers @feature agentbridge std::string accumulator: AsciiString is capped at MAX_LEN (32767, asserted)
+	// and wraps structurally past 64K (unsigned short m_numCharsAllocated) — large armies would overflow it.
+	std::string buildObservation();   // filled out in M1
 	void applyActions(const AsciiString& actionsJson); // filled out in M2
 
 	unsigned int m_listenSock;   // SOCKET (unsigned) or ~0u if none
