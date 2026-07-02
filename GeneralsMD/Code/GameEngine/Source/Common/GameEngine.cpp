@@ -105,6 +105,9 @@
 #include "GameNetwork/WOLBrowser/WebBrowser.h"
 #include "GameNetwork/LANAPI.h"
 #include "GameNetwork/GameSpy/GameResultsThread.h"
+#if RTS_BUILD_AGENT_BRIDGE
+#include "GameNetwork/AgentBridge.h"
+#endif
 
 #include "Common/version.h"
 
@@ -609,6 +612,11 @@ void GameEngine::init()
 
 
 		initSubsystem(TheAI,"TheAI", MSGNEW("GameEngineSubsystem") AI(), &xferCRC,  "Data\\INI\\Default\\AIData", "Data\\INI\\AIData");
+#if RTS_BUILD_AGENT_BRIDGE
+		// TheSuperHackers @feature agentbridge register the external control server
+		if (TheGlobalData->m_agentBridge)
+			initSubsystem(TheAgentBridge, "TheAgentBridge", MSGNEW("GameEngineSubsystem") AgentBridge(), nullptr);
+#endif
 		initSubsystem(TheGameLogic,"TheGameLogic", createGameLogic(), nullptr);
 		initSubsystem(TheTeamFactory,"TheTeamFactory", MSGNEW("GameEngineSubsystem") TeamFactory(), nullptr);
 		initSubsystem(TheCrateSystem,"TheCrateSystem", MSGNEW("GameEngineSubsystem") CrateSystem(), &xferCRC, "Data\\INI\\Default\\Crate", "Data\\INI\\Crate");

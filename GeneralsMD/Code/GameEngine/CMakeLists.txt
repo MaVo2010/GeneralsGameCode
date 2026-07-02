@@ -1109,6 +1109,7 @@ set(GAMEENGINE_SRC
 #    Source/GameNetwork/GameSpy/Thread/PingThread.cpp
 #    Source/GameNetwork/GameSpy/Thread/ThreadUtils.cpp
 #    Source/GameNetwork/GameSpyOverlay.cpp
+    Source/GameNetwork/AgentBridge.cpp
     Source/GameNetwork/GUIUtil.cpp
 #    Source/GameNetwork/IPEnumeration.cpp
 #    Source/GameNetwork/LANAPI.cpp
