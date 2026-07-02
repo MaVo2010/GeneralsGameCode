@@ -121,6 +121,12 @@ public:
 	// Run game without graphics, input or audio.
 	Bool m_headless;
 
+#if RTS_BUILD_AGENT_BRIDGE
+	// TheSuperHackers @feature agentbridge external control server
+	Bool m_agentBridge;      ///< AgentBridge TCP server enabled via -agentbridge
+	Int  m_agentBridgePort;  ///< TCP port for the AgentBridge listener
+#endif
+
 	Bool m_windowed;
 	Int m_xResolution;
 	Int m_yResolution;

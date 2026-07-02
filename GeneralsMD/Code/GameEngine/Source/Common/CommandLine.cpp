@@ -424,6 +424,23 @@ Int parseHeadless(char *args[], int num)
 	return 1;
 }
 
+#if RTS_BUILD_AGENT_BRIDGE
+Int parseAgentBridge(char *args[], int num)
+{
+	TheWritableGlobalData->m_agentBridge = TRUE;
+	if (num > 1 && args[1] != NULL && args[1][0] != '-')
+	{
+		Int port = atoi(args[1]);
+		if (port > 0 && port < 65536)
+		{
+			TheWritableGlobalData->m_agentBridgePort = port;
+			return 2; // consumed flag + port
+		}
+	}
+	return 1; // consumed flag only (keep default port)
+}
+#endif
+
 Int parseReplay(char *args[], int num)
 {
 	if (num > 1)
@@ -1132,6 +1149,10 @@ static CommandLineParam paramsForStartup[] =
 	// TheSuperHackers @feature helmutbuhler 11/04/2025
 	// This runs the game without a window, graphics, input and audio. You can combine this with -replay
 	{ "-headless", parseHeadless },
+
+#if RTS_BUILD_AGENT_BRIDGE
+	{ "-agentbridge", parseAgentBridge },
+#endif
 
 	// TheSuperHackers @feature helmutbuhler 13/04/2025
 	// Play back a replay. Pass the filename including .rep afterwards.

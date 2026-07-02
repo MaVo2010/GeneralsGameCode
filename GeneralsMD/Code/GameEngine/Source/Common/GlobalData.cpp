@@ -636,6 +636,10 @@ GlobalData::GlobalData()
 	m_framesPerSecondLimit = 0;
 	m_chipSetType = 0;
 	m_headless = FALSE;
+#if RTS_BUILD_AGENT_BRIDGE
+	m_agentBridge = FALSE;
+	m_agentBridgePort = 8787;
+#endif
 	m_windowed = 0;
 	m_xResolution = DEFAULT_DISPLAY_WIDTH;
 	m_yResolution = DEFAULT_DISPLAY_HEIGHT;
