@@ -79,6 +79,7 @@ Bool AgentBridge::recvJson(AsciiString& out) {
 	unsigned int len = (hdr[0]<<24)|(hdr[1]<<16)|(hdr[2]<<8)|hdr[3];
 	if (len == 0 || len > 8u*1024u*1024u) { closeClient(); return FALSE; }
 	char* buf = (char*)malloc(len+1);
+	if (!buf) { closeClient(); return FALSE; }
 	if (!recvAll((SOCKET)m_clientSock, buf, (int)len)) { free(buf); closeClient(); return FALSE; }
 	buf[len] = 0; out = buf; free(buf); return TRUE;
 }
