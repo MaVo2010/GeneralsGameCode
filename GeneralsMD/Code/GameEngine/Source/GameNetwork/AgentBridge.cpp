@@ -15,6 +15,10 @@
 #include "GameLogic/Object.h"
 #include "GameLogic/Module/AIUpdate.h"
 #include "Common/ThingTemplate.h"
+// TheSuperHackers @feature agentbridge action-batch JSON parsing + MessageStream injection (M3)
+#include "GameNetwork/AgentBridgeJson.h"
+#include "Common/MessageStream.h"
+#include "GameLogic/TerrainLogic.h"
 #include <winsock.h>
 
 AgentBridge* TheAgentBridge = NULL;
@@ -24,7 +28,7 @@ static Bool s_winsockUp = FALSE;
 AgentBridge::AgentBridge()
 	: m_listenSock(~0u), m_clientSock(~0u), m_framesPerStep(5),
 	  m_framesSinceStep(0), m_awaitingFirstStep(TRUE),
-	  m_agentPlayerIndex(-1) {}
+	  m_agentPlayerIndex(-1), m_lastApplied(0) {}
 
 AgentBridge::~AgentBridge() { closeClient();
 	if (m_listenSock != ~0u) { closesocket((SOCKET)m_listenSock); m_listenSock = ~0u; }
@@ -192,42 +196,123 @@ std::string AgentBridge::buildObservation() {
 	out.append(tail.str());
 	return out;
 }
-// TheSuperHackers @feature agentbridge minimal, forgiving scan for the fixed M2 action
-// grammar ({"cmd":"step","actions":[{"type":"move","unit":<id>,"pos":[x,y]}...]}).
-// Avoids pulling in a JSON lib for this small, structured payload.
-static Bool nextNumber(const char*& p, double& val) {
-	while (*p && (*p < '0' || *p > '9') && *p != '-' && *p != '+' && *p != '.') {
-		if (*p == ']') return FALSE; ++p; }
-	if (!*p) return FALSE; char* end = NULL; val = strtod(p, &end);
-	if (end == p) return FALSE; p = end; return TRUE;
+// TheSuperHackers @feature agentbridge validate one action and inject it via the
+// player message path. Returns NULL when injected, else a static reason string.
+const char* AgentBridge::applyOneAction(const AgentJsonValue& action, Player* agent)
+{
+	if (!action.isObject()) return "bad_args";
+	const AgentJsonValue* type = action.getMember("type");
+	if (!type || !type->isString()) return "bad_args";
+
+	const std::string& t = type->asString();
+	Bool isMove = (t == "move");
+	Bool isAttack = (t == "attack");
+	Bool isAttackMove = (t == "attack_move");
+	Bool isStop = (t == "stop");
+	if (!isMove && !isAttack && !isAttackMove && !isStop) return "unknown_type";
+
+	const AgentJsonValue* unitVal = action.getMember("unit");
+	if (!unitVal || !unitVal->isNumber()) return "bad_args";
+	double unitNum = unitVal->asNumber();
+	if (unitNum < 1.0 || unitNum > 4294967295.0) return "no_such_unit";
+	ObjectID unitId = (ObjectID)(UnsignedInt)unitNum;
+
+	Object* obj = TheGameLogic->findObjectByID(unitId);
+	if (!obj) return "no_such_unit";
+	if (obj->getControllingPlayer() != agent) return "not_owned";
+	if (!obj->getAIUpdateInterface()) return "no_ai";
+
+	Coord3D dest;
+	dest.x = dest.y = dest.z = 0.0f;
+	Object* victim = NULL;
+	if (isMove || isAttackMove)
+	{
+		const AgentJsonValue* pos = action.getMember("pos");
+		if (!pos || !pos->isArray() || pos->size() < 2) return "bad_args";
+		const AgentJsonValue* px = pos->at(0);
+		const AgentJsonValue* py = pos->at(1);
+		if (!px || !py || !px->isNumber() || !py->isNumber()) return "bad_args";
+		Real x = (Real)px->asNumber();
+		Real y = (Real)py->asNumber();
+		if (!(x == x) || !(y == y)) return "bad_args"; // NaN guard
+		Region3D extent;
+		TheTerrainLogic->getExtent(&extent);
+		if (x < extent.lo.x || x > extent.hi.x || y < extent.lo.y || y > extent.hi.y) return "bad_target";
+		dest.set(x, y, 0.0f);
+	}
+	else if (isAttack)
+	{
+		const AgentJsonValue* target = action.getMember("target");
+		if (!target || !target->isNumber()) return "bad_args";
+		double targetNum = target->asNumber();
+		if (targetNum < 1.0 || targetNum > 4294967295.0) return "bad_target";
+		victim = TheGameLogic->findObjectByID((ObjectID)(UnsignedInt)targetNum);
+		if (!victim) return "bad_target";
+		if (agent->getRelationship(victim->getTeam()) != ENEMIES) return "bad_target";
+	}
+
+	// TheSuperHackers @feature agentbridge select-then-act on TheMessageStream —
+	// identical to a player order: deterministic, replay-recorded, CRC-safe.
+	GameMessage* sel = TheMessageStream->appendMessage(GameMessage::MSG_CREATE_SELECTED_GROUP);
+	sel->appendBooleanArgument(TRUE); // start a fresh selection
+	sel->appendObjectIDArgument(unitId);
+
+	if (isMove)
+	{
+		GameMessage* m = TheMessageStream->appendMessage(GameMessage::MSG_DO_MOVETO);
+		m->appendLocationArgument(dest);
+	}
+	else if (isAttackMove)
+	{
+		GameMessage* m = TheMessageStream->appendMessage(GameMessage::MSG_DO_ATTACKMOVETO);
+		m->appendLocationArgument(dest);
+	}
+	else if (isAttack)
+	{
+		GameMessage* m = TheMessageStream->appendMessage(GameMessage::MSG_DO_ATTACK_OBJECT);
+		m->appendObjectIDArgument(victim->getID());
+	}
+	else // stop
+	{
+		TheMessageStream->appendMessage(GameMessage::MSG_DO_STOP);
+	}
+
+	return NULL;
 }
 
-// M2: apply the client's queued actions. Only "move" is supported so far; orders are
-// restricted to objects controlled by the agent player (ownership guard below) and go
-// through the same AICommandInterface/CMD_FROM_PLAYER path as a human player order, so
-// this stays deterministic (no rand/wall-clock introduced here).
-void AgentBridge::applyActions(const AsciiString& actionsJson) {
-	Player* agent = (m_agentPlayerIndex < 0) ? ThePlayerList->getLocalPlayer()
-	                                         : ThePlayerList->getNthPlayer(m_agentPlayerIndex);
-	if (!agent) return;
-	const char* p = actionsJson.str();
-	while ((p = strstr(p, "\"type\"")) != NULL) {
-		const char* mv = strstr(p, "move");
-		const char* unitKey = strstr(p, "\"unit\"");
-		if (!mv || !unitKey) { ++p; continue; }
-		p = unitKey + 6;
-		double idv; if (!nextNumber(p, idv)) break;
-		const char* posKey = strstr(p, "\"pos\"");
-		if (!posKey) continue;
-		p = posKey + 5;
-		double x, y; if (!nextNumber(p, x)) continue; if (!nextNumber(p, y)) continue;
+void AgentBridge::applyActions(const AsciiString& actionsJson)
+{
+	m_lastApplied = 0;
+	m_lastRejected.clear();
 
-		Object* obj = TheGameLogic->findObjectByID((ObjectID)(UnsignedInt)idv);
-		if (!obj || obj->getControllingPlayer() != agent) continue;  // ownership guard
-		AIUpdateInterface* ai = obj->getAIUpdateInterface();
-		if (!ai) continue;
-		Coord3D dest; dest.set((Real)x, (Real)y, 0.0f);
-		ai->aiMoveToPosition(&dest, CMD_FROM_PLAYER);  // TheSuperHackers @feature agentbridge
+	Player* agent = NULL;
+	if (ThePlayerList)
+		agent = (m_agentPlayerIndex < 0) ? ThePlayerList->getLocalPlayer()
+		                                 : ThePlayerList->getNthPlayer(m_agentPlayerIndex);
+	AgentJsonValue root;
+	if (!agent || !TheMessageStream || !AgentJsonValue::parse(actionsJson.str(), root) || !root.isObject())
+	{
+		RejectedAction r = { -1, "parse_error" };
+		m_lastRejected.push_back(r);
+		return;
+	}
+	const AgentJsonValue* actions = root.getMember("actions");
+	if (!actions || !actions->isArray())
+	{
+		RejectedAction r = { -1, "parse_error" };
+		m_lastRejected.push_back(r);
+		return;
+	}
+	for (size_t i = 0; i < actions->size(); ++i)
+	{
+		const char* reason = applyOneAction(*actions->at(i), agent);
+		if (reason == NULL)
+			m_lastApplied++;
+		else
+		{
+			RejectedAction r = { (Int)i, reason };
+			m_lastRejected.push_back(r);
+		}
 	}
 }
 
