@@ -106,6 +106,7 @@
 #include "GameNetwork/LANAPI.h"
 #include "GameNetwork/GameSpy/GameResultsThread.h"
 #if RTS_BUILD_AGENT_BRIDGE
+// TheSuperHackers @feature agentbridge external synchronous control server (experimental)
 #include "GameNetwork/AgentBridge.h"
 #endif
 

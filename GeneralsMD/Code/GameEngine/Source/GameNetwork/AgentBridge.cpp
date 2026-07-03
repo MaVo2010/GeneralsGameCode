@@ -5,6 +5,8 @@
 #include "GameNetwork/AgentBridge.h"
 #include "Common/GlobalData.h"
 #include "GameLogic/GameLogic.h"
+// TheSuperHackers @feature agentbridge TheNetwork, to restrict the bridge to offline games
+#include "GameNetwork/NetworkDefs.h"
 // TheSuperHackers @feature agentbridge observation serializer includes (M1)
 #include "Common/PlayerList.h"
 #include "Common/Player.h"
@@ -86,7 +88,11 @@ Bool AgentBridge::recvJson(AsciiString& out) {
 	unsigned char hdr[4];
 	if (!recvAll((SOCKET)m_clientSock, (char*)hdr, 4)) { closeClient(); return FALSE; }
 	unsigned int len = (hdr[0]<<24)|(hdr[1]<<16)|(hdr[2]<<8)|hdr[3];
-	if (len == 0 || len > 8u*1024u*1024u) { closeClient(); return FALSE; }
+	// TheSuperHackers @feature agentbridge cap at an AsciiString-safe size: the payload
+	// sinks into an AsciiString below, which asserts past MAX_LEN (32767, debug-only) and
+	// structurally corrupts past 64K (m_numCharsAllocated is unsigned short); action
+	// batches are far smaller than this.
+	if (len == 0 || len > 32u*1024u) { closeClient(); return FALSE; }
 	char* buf = (char*)malloc(len+1);
 	if (!buf) { closeClient(); return FALSE; }
 	if (!recvAll((SOCKET)m_clientSock, buf, (int)len)) { free(buf); closeClient(); return FALSE; }
@@ -234,7 +240,12 @@ Bool AgentBridge::preLogicSync() {
 	if (m_listenSock == ~0u) return FALSE;                       // bridge not listening
 	acceptClientIfWaiting();                                     // opportunistic, non-blocking
 	if (m_clientSock == ~0u) return FALSE;                       // no client → pace normally
-	if (!TheGameLogic || !TheGameLogic->isInGame()) return FALSE;// not in game → pace normally
+	// TheSuperHackers @feature agentbridge envelope: interactive offline game only.
+	// isInInteractiveGame() (unlike isInGame()) excludes GAME_NONE/GAME_SHELL, so a
+	// connecting client can no longer seize the shell/menu game; TheNetwork == NULL keeps
+	// this offline-only, since forcing logic frames in a network game would bypass
+	// canUpdateNetworkGameLogic() and guarantee an out-of-sync.
+	if (!TheGameLogic || !TheGameLogic->isInInteractiveGame() || TheNetwork != NULL) return FALSE;
 
 	m_framesSinceStep++;
 	if (m_awaitingFirstStep || m_framesSinceStep >= m_framesPerStep) {
