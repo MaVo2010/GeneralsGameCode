@@ -186,7 +186,44 @@ std::string AgentBridge::buildObservation() {
 	out.append(tail.str());
 	return out;
 }
-void AgentBridge::applyActions(const AsciiString& /*actionsJson*/) { /* M2 */ }
+// TheSuperHackers @feature agentbridge minimal, forgiving scan for the fixed M2 action
+// grammar ({"cmd":"step","actions":[{"type":"move","unit":<id>,"pos":[x,y]}...]}).
+// Avoids pulling in a JSON lib for this small, structured payload.
+static Bool nextNumber(const char*& p, double& val) {
+	while (*p && (*p < '0' || *p > '9') && *p != '-' && *p != '+' && *p != '.') {
+		if (*p == ']') return FALSE; ++p; }
+	if (!*p) return FALSE; char* end = NULL; val = strtod(p, &end);
+	if (end == p) return FALSE; p = end; return TRUE;
+}
+
+// M2: apply the client's queued actions. Only "move" is supported so far; orders are
+// restricted to objects controlled by the agent player (ownership guard below) and go
+// through the same AICommandInterface/CMD_FROM_PLAYER path as a human player order, so
+// this stays deterministic (no rand/wall-clock introduced here).
+void AgentBridge::applyActions(const AsciiString& actionsJson) {
+	Player* agent = (m_agentPlayerIndex < 0) ? ThePlayerList->getLocalPlayer()
+	                                         : ThePlayerList->getNthPlayer(m_agentPlayerIndex);
+	if (!agent) return;
+	const char* p = actionsJson.str();
+	while ((p = strstr(p, "\"type\"")) != NULL) {
+		const char* mv = strstr(p, "move");
+		const char* unitKey = strstr(p, "\"unit\"");
+		if (!mv || !unitKey) { ++p; continue; }
+		p = unitKey + 6;
+		double idv; if (!nextNumber(p, idv)) break;
+		const char* posKey = strstr(p, "\"pos\"");
+		if (!posKey) continue;
+		p = posKey + 5;
+		double x, y; if (!nextNumber(p, x)) continue; if (!nextNumber(p, y)) continue;
+
+		Object* obj = TheGameLogic->findObjectByID((ObjectID)(UnsignedInt)idv);
+		if (!obj || obj->getControllingPlayer() != agent) continue;  // ownership guard
+		AIUpdateInterface* ai = obj->getAIUpdateInterface();
+		if (!ai) continue;
+		Coord3D dest; dest.set((Real)x, (Real)y, 0.0f);
+		ai->aiMoveToPosition(&dest, CMD_FROM_PLAYER);  // TheSuperHackers @feature agentbridge
+	}
+}
 
 // Returns TRUE only while the bridge is CONTROLLING the clock: a client is
 // connected AND a game is running. Otherwise returns FALSE so the engine paces
