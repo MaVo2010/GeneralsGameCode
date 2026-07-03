@@ -6,6 +6,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
+#include <float.h>
 
 class AgentJsonParser
 {
@@ -134,6 +135,7 @@ private:
 		char* end = NULL;
 		double v = strtod(m_p, &end);
 		if (end == m_p) return false;
+		if (!(v == v) || v > DBL_MAX || v < -DBL_MAX) return false; // reject NaN/inf (strtod accepts non-JSON "nan"/"inf")
 		m_p = end;
 		out.m_type = AgentJsonValue::JSON_NUMBER;
 		out.m_number = v;

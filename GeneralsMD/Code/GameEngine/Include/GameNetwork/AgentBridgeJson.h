@@ -7,7 +7,7 @@
 #include <map>
 
 // Minimal JSON value + recursive-descent parser, tailored to the AgentBridge
-// protocol. Zero dependencies. Numbers are doubles; duplicate object keys:
+// protocol. Zero dependencies. Numbers are doubles (non-finite values are rejected); duplicate object keys:
 // last one wins; \uXXXX escapes are consumed and replaced with '?' (the
 // protocol never sends them). Nesting is depth-capped.
 class AgentJsonValue
