@@ -15,6 +15,12 @@
 #include "GameLogic/Object.h"
 #include "GameLogic/Module/AIUpdate.h"
 #include "Common/ThingTemplate.h"
+// TheSuperHackers @feature agentbridge action-batch JSON parsing + MessageStream injection (M3)
+#include "GameNetwork/AgentBridgeJson.h"
+#include "Common/MessageStream.h"
+#include "GameLogic/TerrainLogic.h"
+// TheSuperHackers @feature agentbridge done flag from TheVictoryConditions (M3)
+#include "GameLogic/VictoryConditions.h"
 #include <winsock.h>
 
 AgentBridge* TheAgentBridge = NULL;
@@ -24,7 +30,9 @@ static Bool s_winsockUp = FALSE;
 AgentBridge::AgentBridge()
 	: m_listenSock(~0u), m_clientSock(~0u), m_framesPerStep(5),
 	  m_framesSinceStep(0), m_awaitingFirstStep(TRUE),
-	  m_agentPlayerIndex(-1) {}
+	  // TheSuperHackers @feature agentbridge protocol v1 handshake + gate edge state (M3)
+	  m_awaitingHello(TRUE), m_wasControlling(FALSE),
+	  m_agentPlayerIndex(-1), m_lastApplied(0) {}
 
 AgentBridge::~AgentBridge() { closeClient();
 	if (m_listenSock != ~0u) { closesocket((SOCKET)m_listenSock); m_listenSock = ~0u; }
@@ -54,7 +62,8 @@ void AgentBridge::init()
 	DEBUG_LOG(("AgentBridge: listening on 127.0.0.1:%d", TheGlobalData->m_agentBridgePort));
 }
 
-void AgentBridge::reset() { m_framesSinceStep = 0; m_awaitingFirstStep = TRUE; }
+// TheSuperHackers @feature agentbridge re-arm the v1 hello whenever the connection state resets (M3)
+void AgentBridge::reset() { m_framesSinceStep = 0; m_awaitingFirstStep = TRUE; m_awaitingHello = TRUE; }
 void AgentBridge::update() { /* driven via preLogicSync() from GameEngine::update() */ }
 
 void AgentBridge::closeClient() {
@@ -68,7 +77,8 @@ Bool AgentBridge::acceptClientIfWaiting() {
 	if (select(0, &fds, NULL, NULL, &tv) > 0) {
 		SOCKET c = accept((SOCKET)m_listenSock, NULL, NULL);
 		if (c != INVALID_SOCKET) { m_clientSock = (unsigned int)c;
-			m_awaitingFirstStep = TRUE; m_framesSinceStep = 0;
+			// TheSuperHackers @feature agentbridge new connection must re-send the v1 hello (M3)
+			m_awaitingFirstStep = TRUE; m_framesSinceStep = 0; m_awaitingHello = TRUE;
 			DEBUG_LOG(("AgentBridge: client connected")); return TRUE; }
 	}
 	return FALSE;
@@ -89,10 +99,9 @@ Bool AgentBridge::recvJson(AsciiString& out) {
 	if (!recvAll((SOCKET)m_clientSock, (char*)hdr, 4)) { closeClient(); return FALSE; }
 	unsigned int len = (hdr[0]<<24)|(hdr[1]<<16)|(hdr[2]<<8)|hdr[3];
 	// TheSuperHackers @feature agentbridge cap at an AsciiString-safe size: the payload
-	// sinks into an AsciiString below, which asserts past MAX_LEN (32767, debug-only) and
-	// structurally corrupts past 64K (m_numCharsAllocated is unsigned short); action
-	// batches are far smaller than this.
-	if (len == 0 || len > 32u*1024u) { closeClient(); return FALSE; }
+	// sinks into an AsciiString below; AsciiString asserts above 32766 in debug; 32000
+	// leaves margin. Action batches are far smaller than this.
+	if (len == 0 || len > 32000u) { closeClient(); return FALSE; }
 	char* buf = (char*)malloc(len+1);
 	if (!buf) { closeClient(); return FALSE; }
 	if (!recvAll((SOCKET)m_clientSock, buf, (int)len)) { free(buf); closeClient(); return FALSE; }
@@ -161,7 +170,8 @@ std::string AgentBridge::buildObservation() {
 
 	std::string out;
 	AsciiString head;
-	head.format("{\"schema\":0,\"frame\":%u,\"player\":{\"id\":%d,\"money\":%u,\"power_produced\":%d,\"power_used\":%d},",
+	// TheSuperHackers @feature agentbridge schema 1: honest last_action + done (M3, DESIGN §8)
+	head.format("{\"schema\":1,\"frame\":%u,\"player\":{\"id\":%d,\"money\":%u,\"power_produced\":%d,\"power_used\":%d},",
 		TheGameLogic ? TheGameLogic->getFrame() : 0, viewer,
 		agent ? agent->getMoney()->countMoney() : 0,
 		agent ? agent->getEnergy()->getProduction() : 0,
@@ -186,49 +196,161 @@ std::string AgentBridge::buildObservation() {
 			firstEnemy = eb.first; // preserve comma state across players
 		}
 	}
+	// TheSuperHackers @feature agentbridge v1 tail: real last_action results + done from TheVictoryConditions (M3)
 	AsciiString tail;
-	tail.format("],\"map\":{\"width\":%.0f,\"height\":%.0f},\"last_action\":{\"accepted\":true,\"reason\":\"\"},\"done\":false}",
-		TheGameLogic ? TheGameLogic->getWidth() : 0.0f, TheGameLogic ? TheGameLogic->getHeight() : 0.0f);
+	tail.format("],\"map\":{\"width\":%.0f,\"height\":%.0f},\"last_action\":{\"applied\":%d,\"rejected\":[",
+		TheGameLogic ? TheGameLogic->getWidth() : 0.0f,
+		TheGameLogic ? TheGameLogic->getHeight() : 0.0f,
+		m_lastApplied);
 	out.append(tail.str());
+	for (size_t i = 0; i < m_lastRejected.size(); ++i)
+	{
+		AsciiString rej;
+		rej.format("%s{\"index\":%d,\"reason\":\"%s\"}",
+			i ? "," : "", m_lastRejected[i].index, m_lastRejected[i].reason);
+		out.append(rej.str());
+	}
+	Bool done = FALSE;
+	if (agent && TheVictoryConditions)
+		done = TheVictoryConditions->hasAchievedVictory(agent) || TheVictoryConditions->hasBeenDefeated(agent);
+	out.append(done ? "]},\"done\":true}" : "]},\"done\":false}");
 	return out;
 }
-// TheSuperHackers @feature agentbridge minimal, forgiving scan for the fixed M2 action
-// grammar ({"cmd":"step","actions":[{"type":"move","unit":<id>,"pos":[x,y]}...]}).
-// Avoids pulling in a JSON lib for this small, structured payload.
-static Bool nextNumber(const char*& p, double& val) {
-	while (*p && (*p < '0' || *p > '9') && *p != '-' && *p != '+' && *p != '.') {
-		if (*p == ']') return FALSE; ++p; }
-	if (!*p) return FALSE; char* end = NULL; val = strtod(p, &end);
-	if (end == p) return FALSE; p = end; return TRUE;
+// TheSuperHackers @feature agentbridge validate one action and inject it via the
+// player message path. Returns NULL when injected, else a static reason string.
+const char* AgentBridge::applyOneAction(const AgentJsonValue& action, Player* agent)
+{
+	if (!action.isObject()) return "bad_args";
+	const AgentJsonValue* type = action.getMember("type");
+	if (!type || !type->isString()) return "bad_args";
+
+	const std::string& t = type->asString();
+	Bool isMove = (t == "move");
+	Bool isAttack = (t == "attack");
+	Bool isAttackMove = (t == "attack_move");
+	Bool isStop = (t == "stop");
+	if (!isMove && !isAttack && !isAttackMove && !isStop) return "unknown_type";
+
+	const AgentJsonValue* unitVal = action.getMember("unit");
+	if (!unitVal || !unitVal->isNumber()) return "bad_args";
+	double unitNum = unitVal->asNumber();
+	if (unitNum < 1.0 || unitNum > 4294967295.0) return "no_such_unit";
+	ObjectID unitId = (ObjectID)(UnsignedInt)unitNum;
+
+	Object* obj = TheGameLogic->findObjectByID(unitId);
+	if (!obj) return "no_such_unit";
+	if (obj->getControllingPlayer() != agent) return "not_owned";
+	if (!obj->getAIUpdateInterface()) return "no_ai";
+
+	Coord3D dest;
+	dest.x = dest.y = dest.z = 0.0f;
+	Object* victim = NULL;
+	if (isMove || isAttackMove)
+	{
+		const AgentJsonValue* pos = action.getMember("pos");
+		if (!pos || !pos->isArray() || pos->size() < 2) return "bad_args";
+		const AgentJsonValue* px = pos->at(0);
+		const AgentJsonValue* py = pos->at(1);
+		if (!px || !py || !px->isNumber() || !py->isNumber()) return "bad_args";
+		Real x = (Real)px->asNumber();
+		Real y = (Real)py->asNumber();
+		if (!(x == x) || !(y == y)) return "bad_args"; // NaN guard
+		Region3D extent;
+		TheTerrainLogic->getExtent(&extent);
+		if (x < extent.lo.x || x > extent.hi.x || y < extent.lo.y || y > extent.hi.y) return "bad_target";
+		dest.set(x, y, 0.0f);
+	}
+	else if (isAttack)
+	{
+		const AgentJsonValue* target = action.getMember("target");
+		if (!target || !target->isNumber()) return "bad_args";
+		double targetNum = target->asNumber();
+		if (targetNum < 1.0 || targetNum > 4294967295.0) return "bad_target";
+		victim = TheGameLogic->findObjectByID((ObjectID)(UnsignedInt)targetNum);
+		if (!victim) return "bad_target";
+		if (agent->getRelationship(victim->getTeam()) != ENEMIES) return "bad_target";
+	}
+
+	// TheSuperHackers @feature agentbridge select-then-act on TheMessageStream —
+	// identical to a player order: deterministic, replay-recorded, CRC-safe.
+	GameMessage* sel = TheMessageStream->appendMessage(GameMessage::MSG_CREATE_SELECTED_GROUP);
+	sel->appendBooleanArgument(TRUE); // start a fresh selection
+	sel->appendObjectIDArgument(unitId);
+
+	if (isMove)
+	{
+		GameMessage* m = TheMessageStream->appendMessage(GameMessage::MSG_DO_MOVETO);
+		m->appendLocationArgument(dest);
+	}
+	else if (isAttackMove)
+	{
+		GameMessage* m = TheMessageStream->appendMessage(GameMessage::MSG_DO_ATTACKMOVETO);
+		m->appendLocationArgument(dest);
+	}
+	else if (isAttack)
+	{
+		GameMessage* m = TheMessageStream->appendMessage(GameMessage::MSG_DO_ATTACK_OBJECT);
+		m->appendObjectIDArgument(victim->getID());
+	}
+	else // stop
+	{
+		TheMessageStream->appendMessage(GameMessage::MSG_DO_STOP);
+	}
+
+	return NULL;
 }
 
-// M2: apply the client's queued actions. Only "move" is supported so far; orders are
-// restricted to objects controlled by the agent player (ownership guard below) and go
-// through the same AICommandInterface/CMD_FROM_PLAYER path as a human player order, so
-// this stays deterministic (no rand/wall-clock introduced here).
-void AgentBridge::applyActions(const AsciiString& actionsJson) {
-	Player* agent = (m_agentPlayerIndex < 0) ? ThePlayerList->getLocalPlayer()
-	                                         : ThePlayerList->getNthPlayer(m_agentPlayerIndex);
-	if (!agent) return;
-	const char* p = actionsJson.str();
-	while ((p = strstr(p, "\"type\"")) != NULL) {
-		const char* mv = strstr(p, "move");
-		const char* unitKey = strstr(p, "\"unit\"");
-		if (!mv || !unitKey) { ++p; continue; }
-		p = unitKey + 6;
-		double idv; if (!nextNumber(p, idv)) break;
-		const char* posKey = strstr(p, "\"pos\"");
-		if (!posKey) continue;
-		p = posKey + 5;
-		double x, y; if (!nextNumber(p, x)) continue; if (!nextNumber(p, y)) continue;
+void AgentBridge::applyActions(const AsciiString& actionsJson)
+{
+	m_lastApplied = 0;
+	m_lastRejected.clear();
 
-		Object* obj = TheGameLogic->findObjectByID((ObjectID)(UnsignedInt)idv);
-		if (!obj || obj->getControllingPlayer() != agent) continue;  // ownership guard
-		AIUpdateInterface* ai = obj->getAIUpdateInterface();
-		if (!ai) continue;
-		Coord3D dest; dest.set((Real)x, (Real)y, 0.0f);
-		ai->aiMoveToPosition(&dest, CMD_FROM_PLAYER);  // TheSuperHackers @feature agentbridge
+	Player* agent = NULL;
+	if (ThePlayerList)
+		agent = (m_agentPlayerIndex < 0) ? ThePlayerList->getLocalPlayer()
+		                                 : ThePlayerList->getNthPlayer(m_agentPlayerIndex);
+	AgentJsonValue root;
+	if (!agent || !TheMessageStream || !AgentJsonValue::parse(actionsJson.str(), root) || !root.isObject())
+	{
+		RejectedAction r = { -1, "parse_error" };
+		m_lastRejected.push_back(r);
+		return;
 	}
+	const AgentJsonValue* actions = root.getMember("actions");
+	if (!actions || !actions->isArray())
+	{
+		RejectedAction r = { -1, "parse_error" };
+		m_lastRejected.push_back(r);
+		return;
+	}
+	for (size_t i = 0; i < actions->size(); ++i)
+	{
+		const char* reason = applyOneAction(*actions->at(i), agent);
+		if (reason == NULL)
+			m_lastApplied++;
+		else
+		{
+			RejectedAction r = { (Int)i, reason };
+			m_lastRejected.push_back(r);
+		}
+	}
+}
+
+// TheSuperHackers @feature agentbridge protocol v1 handshake (DESIGN §8.1)
+Bool AgentBridge::processHello(const AsciiString& helloJson)
+{
+	AgentJsonValue root;
+	if (!AgentJsonValue::parse(helloJson.str(), root) || !root.isObject()) return FALSE;
+	const AgentJsonValue* cmd = root.getMember("cmd");
+	if (!cmd || !cmd->isString() || cmd->asString() != "hello") return FALSE;
+	const AgentJsonValue* schema = root.getMember("schema");
+	if (!schema || !schema->isNumber() || schema->asNumber() != 1.0) return FALSE;
+	const AgentJsonValue* fps = root.getMember("frames_per_step");
+	if (!fps || !fps->isNumber()) return FALSE;
+	double n = fps->asNumber();
+	if (n < 1.0 || n > 60.0 || n != (double)(Int)n) return FALSE;
+	m_framesPerStep = (Int)n;
+	return TRUE;
 }
 
 // Returns TRUE only while the bridge is CONTROLLING the clock: a client is
@@ -236,30 +358,56 @@ void AgentBridge::applyActions(const AsciiString& actionsJson) {
 // normally — menus stay responsive and you can start a skirmish before/while a
 // client is attached. When controlling, it forces one logic frame per call and
 // blocks at every Nth frame to exchange observation/action with the client.
-Bool AgentBridge::preLogicSync() {
+Bool AgentBridge::preLogicSync()
+{
 	if (m_listenSock == ~0u) return FALSE;                       // bridge not listening
 	acceptClientIfWaiting();                                     // opportunistic, non-blocking
-	if (m_clientSock == ~0u) return FALSE;                       // no client → pace normally
-	// TheSuperHackers @feature agentbridge envelope: interactive offline game only.
-	// isInInteractiveGame() (unlike isInGame()) excludes GAME_NONE/GAME_SHELL, so a
-	// connecting client can no longer seize the shell/menu game; TheNetwork == NULL keeps
-	// this offline-only, since forcing logic frames in a network game would bypass
-	// canUpdateNetworkGameLogic() and guarantee an out-of-sync.
-	if (!TheGameLogic || !TheGameLogic->isInInteractiveGame() || TheNetwork != NULL) return FALSE;
+	if (m_clientSock == ~0u) { m_wasControlling = FALSE; return FALSE; }
+
+	// TheSuperHackers @feature agentbridge envelope: interactive offline game,
+	// never during replay playback (would diverge the CRC we verify against).
+	Bool gateOpen = TheGameLogic && TheGameLogic->isInInteractiveGame()
+		&& !TheGameLogic->isInReplayGame() && TheNetwork == NULL;
+	if (!gateOpen)
+	{
+		if (m_wasControlling)
+		{
+			// game ended while a client was attached: final done notification
+			AsciiString bye;
+			bye.format("{\"schema\":1,\"frame\":%u,\"done\":true}",
+				TheGameLogic ? TheGameLogic->getFrame() : 0);
+			sendJson(bye);
+			closeClient();
+		}
+		m_wasControlling = FALSE;
+		return FALSE;
+	}
 
 	m_framesSinceStep++;
-	if (m_awaitingFirstStep || m_framesSinceStep >= m_framesPerStep) {
-		// Step boundary: report state, block for the next command, apply it.
-		// TheSuperHackers @feature agentbridge send the std::string observation via the raw
-		// length-prefixed overload (buildObservation() is unbounded, unlike AsciiString).
+	if (m_awaitingFirstStep || m_framesSinceStep >= m_framesPerStep)
+	{
+		if (m_awaitingHello)
+		{
+			AsciiString hello;
+			if (!recvJson(hello)) { closeClient(); m_wasControlling = FALSE; return FALSE; }
+			if (!processHello(hello))
+			{
+				sendJson(AsciiString("{\"error\":\"bad_hello\",\"expect_schema\":1}"));
+				closeClient();
+				m_wasControlling = FALSE;
+				return FALSE;
+			}
+			m_awaitingHello = FALSE;
+		}
 		std::string obs = buildObservation();
-		if (!sendJson(obs.data(), (unsigned int)obs.size())) { closeClient(); return FALSE; }
+		if (!sendJson(obs.data(), (unsigned int)obs.size())) { closeClient(); m_wasControlling = FALSE; return FALSE; }
 		AsciiString cmd;
-		if (!recvJson(cmd)) { closeClient(); return FALSE; }
-		applyActions(cmd);                                      // M2 injects orders here
+		if (!recvJson(cmd)) { closeClient(); m_wasControlling = FALSE; return FALSE; }
+		applyActions(cmd);
 		m_framesSinceStep = 0;
 		m_awaitingFirstStep = FALSE;
 	}
+	m_wasControlling = TRUE;
 	return TRUE;   // force exactly one logic frame this iteration (bypass pacer)
 }
 

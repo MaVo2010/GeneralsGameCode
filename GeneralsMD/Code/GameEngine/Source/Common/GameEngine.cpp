@@ -906,6 +906,10 @@ void GameEngine::update()
 {
 	USE_PERF_TIMER(GameEngine_update)
 	{
+#if RTS_BUILD_AGENT_BRIDGE
+		// TheSuperHackers @feature agentbridge declared outside the CRC scope, used below at the pacer gate
+		Bool agentControlling = FALSE;
+#endif
 		{
 			// VERIFY CRC needs to be in this code block.  Please to not pull TheGameLogic->update() inside this block.
 			VERIFY_CRC
@@ -916,6 +920,13 @@ void GameEngine::update()
 
 			TheAudio->UPDATE();
 			TheGameClient->UPDATE();
+#if RTS_BUILD_AGENT_BRIDGE
+			// TheSuperHackers @feature agentbridge synchronous step BEFORE message
+			// propagation: injected GameMessages propagate in this same iteration,
+			// so an action takes effect in the first frame of its step.
+			if (TheAgentBridge && TheAgentBridge->isActive())
+				agentControlling = TheAgentBridge->preLogicSync();
+#endif
 			TheMessageStream->propagateMessages();
 
 			if (TheNetwork != nullptr)
@@ -923,15 +934,6 @@ void GameEngine::update()
 				TheNetwork->UPDATE();
 			}
 		}
-
-#if RTS_BUILD_AGENT_BRIDGE
-		// TheSuperHackers @feature agentbridge synchronous step: blocks at step
-		// boundaries (send observation, wait for + apply the client's action).
-		// Returns TRUE only while actively controlling (client connected + in game).
-		Bool agentControlling = FALSE;
-		if (TheAgentBridge && TheAgentBridge->isActive())
-			agentControlling = TheAgentBridge->preLogicSync();
-#endif
 
 		const Bool canUpdate = canUpdateGameLogic(FramePacer::IgnoreFrozenTime | FramePacer::IgnoreHaltedGame);
 		Bool canUpdateLogic = canUpdate && !TheFramePacer->isGameHalted() && !TheFramePacer->isTimeFrozen();

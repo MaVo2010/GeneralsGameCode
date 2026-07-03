@@ -6,6 +6,8 @@
 #include "Common/AsciiString.h"
 // TheSuperHackers @feature agentbridge std::string accumulator for buildObservation() (unbounded, unlike AsciiString)
 #include <string>
+// TheSuperHackers @feature agentbridge m_lastRejected batch results (M3)
+#include <vector>
 
 class AgentBridge : public SubsystemInterface
 {
@@ -38,12 +40,24 @@ private:
 	std::string buildObservation();   // filled out in M1
 	void applyActions(const AsciiString& actionsJson); // filled out in M2
 
+	// TheSuperHackers @feature agentbridge per-batch action results for last_action (M3)
+	struct RejectedAction { Int index; const char* reason; };  // reason = static string
+	const char* applyOneAction(const class AgentJsonValue& action, class Player* agent);
+	// TheSuperHackers @feature agentbridge protocol v1 handshake (M3, DESIGN §8.1)
+	Bool processHello(const AsciiString& helloJson); // validate + apply hello, FALSE = reject
+
 	unsigned int m_listenSock;   // SOCKET (unsigned) or ~0u if none
 	unsigned int m_clientSock;   // connected client or ~0u
 	Int m_framesPerStep;         // logic frames advanced per step()
 	Int m_framesSinceStep;       // counter toward m_framesPerStep
 	Bool m_awaitingFirstStep;    // true until the client's first step/reset
+	// TheSuperHackers @feature agentbridge protocol v1 handshake + gate edge state (M3)
+	Bool m_awaitingHello;    ///< true until the client's hello is validated
+	Bool m_wasControlling;   ///< bridge controlled the clock last iteration
 	Int m_agentPlayerIndex;      // TheSuperHackers @feature agentbridge which player the agent controls; -1 = local player
+
+	Int m_lastApplied;                        ///< actions injected by the last batch
+	std::vector<RejectedAction> m_lastRejected; ///< rejected actions of the last batch
 };
 
 extern AgentBridge* TheAgentBridge;
