@@ -63,7 +63,12 @@ void AgentBridge::init()
 }
 
 // TheSuperHackers @feature agentbridge re-arm the v1 hello whenever the connection state resets (M3)
-void AgentBridge::reset() { m_framesSinceStep = 0; m_awaitingFirstStep = TRUE; m_awaitingHello = TRUE; }
+void AgentBridge::reset() {
+	m_framesSinceStep = 0; m_awaitingFirstStep = TRUE; m_awaitingHello = TRUE;
+	// TheSuperHackers @feature agentbridge fresh sessions report a clean last_action (M4)
+	m_lastApplied = 0;
+	m_lastRejected.clear();
+}
 void AgentBridge::update() { /* driven via preLogicSync() from GameEngine::update() */ }
 
 void AgentBridge::closeClient() {
@@ -79,6 +84,9 @@ Bool AgentBridge::acceptClientIfWaiting() {
 		if (c != INVALID_SOCKET) { m_clientSock = (unsigned int)c;
 			// TheSuperHackers @feature agentbridge new connection must re-send the v1 hello (M3)
 			m_awaitingFirstStep = TRUE; m_framesSinceStep = 0; m_awaitingHello = TRUE;
+			// TheSuperHackers @feature agentbridge fresh sessions report a clean last_action (M4)
+			m_lastApplied = 0;
+			m_lastRejected.clear();
 			DEBUG_LOG(("AgentBridge: client connected")); return TRUE; }
 	}
 	return FALSE;
@@ -235,6 +243,7 @@ const char* AgentBridge::applyOneAction(const AgentJsonValue& action, Player* ag
 	if (!unitVal || !unitVal->isNumber()) return "bad_args";
 	double unitNum = unitVal->asNumber();
 	if (unitNum < 1.0 || unitNum > 4294967295.0) return "no_such_unit";
+	if (unitNum != (double)(UnsignedInt)unitNum) return "bad_args"; // TheSuperHackers @feature agentbridge fractional ids are client bugs, not truncation targets (M4)
 	ObjectID unitId = (ObjectID)(UnsignedInt)unitNum;
 
 	Object* obj = TheGameLogic->findObjectByID(unitId);
@@ -266,6 +275,7 @@ const char* AgentBridge::applyOneAction(const AgentJsonValue& action, Player* ag
 		if (!target || !target->isNumber()) return "bad_args";
 		double targetNum = target->asNumber();
 		if (targetNum < 1.0 || targetNum > 4294967295.0) return "bad_target";
+		if (targetNum != (double)(UnsignedInt)targetNum) return "bad_args"; // TheSuperHackers @feature agentbridge (M4)
 		victim = TheGameLogic->findObjectByID((ObjectID)(UnsignedInt)targetNum);
 		if (!victim) return "bad_target";
 		if (agent->getRelationship(victim->getTeam()) != ENEMIES) return "bad_target";

@@ -125,6 +125,13 @@ public:
 	// TheSuperHackers @feature agentbridge external control server
 	Bool m_agentBridge;      ///< AgentBridge TCP server enabled via -agentbridge
 	Int  m_agentBridgePort;  ///< TCP port for the AgentBridge listener
+
+	// TheSuperHackers @feature agentbridge scenario autostart (experimental, M4)
+	AsciiString m_autoSkirmishMap;              ///< non-empty = start a skirmish on this map at boot
+	Int         m_autoSkirmishSeed;             ///< pinned game seed for reproducible episodes
+	AsciiString m_autoSkirmishFaction;          ///< PlayerTemplate name for the agent player
+	AsciiString m_autoSkirmishOpponent;         ///< PlayerTemplate name for the AI opponent
+	Int         m_autoSkirmishOpponentDifficulty; ///< 0=easy 1=normal 2=hard -> SLOT_*_AI
 #endif
 
 	Bool m_windowed;

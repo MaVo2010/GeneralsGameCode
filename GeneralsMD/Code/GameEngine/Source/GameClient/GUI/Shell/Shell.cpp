@@ -470,6 +470,17 @@ void Shell::showShell( Bool runInit )
 	{
 		return;
 	}
+#if RTS_BUILD_AGENT_BRIDGE
+	// TheSuperHackers @feature agentbridge autostart suppresses the menu flow (M4).
+	// MainMenuInit() normally clears m_breakTheMovie after GameClient's intro block set it;
+	// without the menu we must clear it here, or W3DDisplay::draw() keeps the whole
+	// render/present block gated off and the window stays black.
+	if (TheGlobalData->m_autoSkirmishMap.isNotEmpty())
+	{
+		TheWritableGlobalData->m_breakTheMovie = FALSE;
+		return;
+	}
+#endif
 
 	// runInit is used if we want show shell to run
 	if(runInit)
@@ -530,6 +541,11 @@ void Shell::showShellMap(Bool useShellMap )
 	// we don't want any of this to show if we're loading straight into a file
 	if (TheGlobalData->m_initialFile.isNotEmpty() || !TheGameLogic || !TheGlobalData->m_simulateReplays.empty())
 		return;
+#if RTS_BUILD_AGENT_BRIDGE
+	// TheSuperHackers @feature agentbridge autostart suppresses the menu flow (M4)
+	if (TheGlobalData->m_autoSkirmishMap.isNotEmpty())
+		return;
+#endif
 	if(useShellMap && TheGlobalData->m_shellMapOn)
 	{
 		// we're already in a shell game, return
