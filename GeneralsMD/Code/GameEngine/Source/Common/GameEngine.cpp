@@ -718,6 +718,76 @@ void GameEngine::init()
 		//TheShell->push( "Menus/MainMenu.wnd" );
 
 		// This allows us to run a map from the command line
+#if RTS_BUILD_AGENT_BRIDGE
+		// TheSuperHackers @feature agentbridge scenario autostart: boot straight into a
+		// reproducible 1v1 skirmish (mirrors SkirmishGameOptionsMenuInit()/reallyDoStart()
+		// and the -file path below). All setup is pinned; the seed comes from -skirmishseed.
+		if (TheGlobalData->m_autoSkirmishMap.isNotEmpty())
+		{
+			AsciiString mapName = TheGlobalData->m_autoSkirmishMap;
+			mapName.toLower();
+			const MapMetaData *md = TheMapCache->findMap(mapName);
+			if (md == NULL || !md->m_isMultiplayer)
+			{
+				printf("autoskirmish: map \"%s\" not found or not multiplayer-capable\n", mapName.str());
+				exit(1);
+			}
+			Int playerTpl = ThePlayerTemplateStore->getTemplateNumByName(TheGlobalData->m_autoSkirmishFaction);
+			Int oppTpl = ThePlayerTemplateStore->getTemplateNumByName(TheGlobalData->m_autoSkirmishOpponent);
+			if (playerTpl < 0 || oppTpl < 0)
+			{
+				printf("autoskirmish: unknown faction \"%s\" or \"%s\"\n",
+					TheGlobalData->m_autoSkirmishFaction.str(), TheGlobalData->m_autoSkirmishOpponent.str());
+				exit(1);
+			}
+
+			// allocate the skirmish game info if the menu never ran (mirror SkirmishGameOptionsMenu.cpp:1268)
+			if (TheSkirmishGameInfo == NULL)
+				TheSkirmishGameInfo = NEW SkirmishGameInfo;
+			TheSkirmishGameInfo->init();
+			TheSkirmishGameInfo->clearSlotList();
+			TheSkirmishGameInfo->reset();
+			TheSkirmishGameInfo->setLocalIP(TheSkirmishGameInfo->getSlot(0)->getIP());
+			TheSkirmishGameInfo->enterGame();   // marks m_inGame (startGame asserts it); re-runs reset()
+			TheSkirmishGameInfo->setMap(mapName);
+			TheSkirmishGameInfo->setMapCRC(md->m_CRC);
+			TheSkirmishGameInfo->setMapSize(md->m_filesize);
+
+			// slot 0: the agent (human/local). Everything explicit so nothing is randomized.
+			GameSlot human;
+			human.setState(SLOT_PLAYER, UnicodeString(L"Agent"));
+			human.setPlayerTemplate(playerTpl);
+			human.setColor(0);
+			human.setStartPos(0);
+			human.setTeamNumber(-1);
+			TheSkirmishGameInfo->setSlot(0, human);
+
+			// slot 1: the AI opponent. Distinct color/start pos so checkForDuplicateColors leaves them.
+			GameSlot ai;
+			SlotState aiState = SLOT_EASY_AI;
+			if (TheGlobalData->m_autoSkirmishOpponentDifficulty == 1) aiState = SLOT_MED_AI;
+			else if (TheGlobalData->m_autoSkirmishOpponentDifficulty == 2) aiState = SLOT_BRUTAL_AI;
+			ai.setState(aiState);
+			ai.setPlayerTemplate(oppTpl);
+			ai.setColor(1);
+			ai.setStartPos(1);
+			ai.setTeamNumber(-1);
+			TheSkirmishGameInfo->setSlot(1, ai);
+
+			// pin the seed AFTER reset()/enterGame() (both re-stamp m_seed = GetTickCount())
+			TheSkirmishGameInfo->setSeed(TheGlobalData->m_autoSkirmishSeed);
+
+			TheWritableGlobalData->m_mapName = TheSkirmishGameInfo->getMap();
+			TheSkirmishGameInfo->startGame(0);
+
+			InitRandom(TheSkirmishGameInfo->getSeed());
+			GameMessage *msg = TheMessageStream->appendMessage( GameMessage::MSG_NEW_GAME );
+			msg->appendIntegerArgument(GAME_SKIRMISH);
+			msg->appendIntegerArgument(DIFFICULTY_NORMAL);
+			msg->appendIntegerArgument(0);
+		}
+		else
+#endif // RTS_BUILD_AGENT_BRIDGE
 		if (TheGlobalData->m_initialFile.isEmpty() == FALSE)
 		{
 			AsciiString fname = TheGlobalData->m_initialFile;
