@@ -639,6 +639,11 @@ GlobalData::GlobalData()
 #if RTS_BUILD_AGENT_BRIDGE
 	m_agentBridge = FALSE;
 	m_agentBridgePort = 8787;
+	m_autoSkirmishMap.clear();
+	m_autoSkirmishSeed = 4711;
+	m_autoSkirmishFaction = "FactionAmerica";
+	m_autoSkirmishOpponent = "FactionGLA";
+	m_autoSkirmishOpponentDifficulty = 0;
 #endif
 	m_windowed = 0;
 	m_xResolution = DEFAULT_DISPLAY_WIDTH;

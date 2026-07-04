@@ -441,6 +441,73 @@ Int parseAgentBridge(char *args[], int num)
 }
 #endif
 
+#if RTS_BUILD_AGENT_BRIDGE
+// TheSuperHackers @feature agentbridge scenario autostart flags (experimental, M4)
+Int parseAutoSkirmish(char *args[], int num)
+{
+	if (num > 1 && args[1] != NULL && args[1][0] != '-')
+	{
+		TheWritableGlobalData->m_autoSkirmishMap = args[1];
+		// mirror parseReplay's menu/intro suppression (CommandLine.cpp:444-468)
+		TheWritableGlobalData->m_playIntro = FALSE;
+		TheWritableGlobalData->m_afterIntro = TRUE;
+		TheWritableGlobalData->m_playSizzle = FALSE;
+		TheWritableGlobalData->m_shellMapOn = FALSE;
+		return 2;
+	}
+	printf("-autoskirmish requires a map name (maps\\<name>\\<name>.map)\n");
+	exit(1);
+	return 1;
+}
+
+Int parseAutoSkirmishSeed(char *args[], int num)
+{
+	if (num > 1 && args[1] != NULL)
+	{
+		TheWritableGlobalData->m_autoSkirmishSeed = atoi(args[1]);
+		return 2;
+	}
+	printf("-skirmishseed requires a number\n");
+	exit(1);
+	return 1;
+}
+
+Int parseAutoSkirmishFaction(char *args[], int num)
+{
+	if (num > 1 && args[1] != NULL && args[1][0] != '-')
+	{
+		TheWritableGlobalData->m_autoSkirmishFaction = args[1];
+		return 2;
+	}
+	printf("-faction requires a PlayerTemplate name (e.g. FactionAmerica)\n");
+	exit(1);
+	return 1;
+}
+
+Int parseAutoSkirmishOpponent(char *args[], int num)
+{
+	if (num > 2 && args[1] != NULL && args[2] != NULL && args[1][0] != '-')
+	{
+		TheWritableGlobalData->m_autoSkirmishOpponent = args[1];
+		if (stricmp(args[2], "easy") == 0)
+			TheWritableGlobalData->m_autoSkirmishOpponentDifficulty = 0;
+		else if (stricmp(args[2], "normal") == 0)
+			TheWritableGlobalData->m_autoSkirmishOpponentDifficulty = 1;
+		else if (stricmp(args[2], "hard") == 0)
+			TheWritableGlobalData->m_autoSkirmishOpponentDifficulty = 2;
+		else
+		{
+			printf("Invalid difficulty \"%s\" (easy|normal|hard)\n", args[2]);
+			exit(1);
+		}
+		return 3;
+	}
+	printf("-opponent requires <PlayerTemplate name> <easy|normal|hard>\n");
+	exit(1);
+	return 1;
+}
+#endif // RTS_BUILD_AGENT_BRIDGE
+
 Int parseReplay(char *args[], int num)
 {
 	if (num > 1)
@@ -1153,6 +1220,10 @@ static CommandLineParam paramsForStartup[] =
 #if RTS_BUILD_AGENT_BRIDGE
 	// TheSuperHackers @feature agentbridge Enables the AgentBridge external control server.
 	{ "-agentbridge", parseAgentBridge },
+	{ "-autoskirmish", parseAutoSkirmish },
+	{ "-skirmishseed", parseAutoSkirmishSeed },
+	{ "-faction", parseAutoSkirmishFaction },
+	{ "-opponent", parseAutoSkirmishOpponent },
 #endif
 
 	// TheSuperHackers @feature helmutbuhler 13/04/2025
