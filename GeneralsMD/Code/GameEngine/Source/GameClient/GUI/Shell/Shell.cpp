@@ -471,9 +471,15 @@ void Shell::showShell( Bool runInit )
 		return;
 	}
 #if RTS_BUILD_AGENT_BRIDGE
-	// TheSuperHackers @feature agentbridge autostart suppresses the menu flow (M4)
+	// TheSuperHackers @feature agentbridge autostart suppresses the menu flow (M4).
+	// MainMenuInit() normally clears m_breakTheMovie after GameClient's intro block set it;
+	// without the menu we must clear it here, or W3DDisplay::draw() keeps the whole
+	// render/present block gated off and the window stays black.
 	if (TheGlobalData->m_autoSkirmishMap.isNotEmpty())
+	{
+		TheWritableGlobalData->m_breakTheMovie = FALSE;
 		return;
+	}
 #endif
 
 	// runInit is used if we want show shell to run
