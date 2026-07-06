@@ -21,6 +21,11 @@ public:
 
 	Bool isActive() const { return m_listenSock != ~0u; }
 
+	// TheSuperHackers @feature agentbridge TRUE while a connected client drives the
+	// lockstep (last preLogicSync result). Read by the frame-pacer gate in
+	// GameEngine::execute() to skip wall-clock pacing during agent-driven frames.
+	Bool isControllingClock() const { return m_controlling; }
+
 	// Called from the GameEngine::update() hook once per frame; drives the
 	// synchronous step protocol (see AgentBridge.cpp). Returns TRUE if the bridge
 	// is controlling the clock this frame (caller then forces one logic frame,
@@ -28,6 +33,9 @@ public:
 	Bool preLogicSync();
 
 private:
+	// TheSuperHackers @feature agentbridge M6: actual preLogicSync() body, wrapped by
+	// preLogicSync() so every return path records m_controlling in one place.
+	Bool preLogicSyncInternal();
 	Bool acceptClientIfWaiting();     // non-blocking accept
 	Bool recvJson(AsciiString& out);  // blocking, length-prefixed
 	Bool sendJson(const AsciiString& json);
@@ -49,11 +57,11 @@ private:
 	unsigned int m_listenSock;   // SOCKET (unsigned) or ~0u if none
 	unsigned int m_clientSock;   // connected client or ~0u
 	Int m_framesPerStep;         // logic frames advanced per step()
+	Bool m_controlling; ///< last preLogicSync() result (client owns the clock this frame)
 	Int m_framesSinceStep;       // counter toward m_framesPerStep
 	Bool m_awaitingFirstStep;    // true until the client's first step/reset
-	// TheSuperHackers @feature agentbridge protocol v1 handshake + gate edge state (M3)
+	// TheSuperHackers @feature agentbridge protocol v1 handshake (M3)
 	Bool m_awaitingHello;    ///< true until the client's hello is validated
-	Bool m_wasControlling;   ///< bridge controlled the clock last iteration
 	Int m_agentPlayerIndex;      // TheSuperHackers @feature agentbridge which player the agent controls; -1 = local player
 
 	Int m_lastApplied;                        ///< actions injected by the last batch
