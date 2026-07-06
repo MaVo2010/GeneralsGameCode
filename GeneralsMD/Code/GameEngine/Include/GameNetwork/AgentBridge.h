@@ -60,9 +60,8 @@ private:
 	Bool m_controlling; ///< last preLogicSync() result (client owns the clock this frame)
 	Int m_framesSinceStep;       // counter toward m_framesPerStep
 	Bool m_awaitingFirstStep;    // true until the client's first step/reset
-	// TheSuperHackers @feature agentbridge protocol v1 handshake + gate edge state (M3)
+	// TheSuperHackers @feature agentbridge protocol v1 handshake (M3)
 	Bool m_awaitingHello;    ///< true until the client's hello is validated
-	Bool m_wasControlling;   ///< bridge controlled the clock last iteration
 	Int m_agentPlayerIndex;      // TheSuperHackers @feature agentbridge which player the agent controls; -1 = local player
 
 	Int m_lastApplied;                        ///< actions injected by the last batch

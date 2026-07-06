@@ -30,8 +30,8 @@ static Bool s_winsockUp = FALSE;
 AgentBridge::AgentBridge()
 	: m_listenSock(~0u), m_clientSock(~0u), m_framesPerStep(5), m_controlling(FALSE),
 	  m_framesSinceStep(0), m_awaitingFirstStep(TRUE),
-	  // TheSuperHackers @feature agentbridge protocol v1 handshake + gate edge state (M3)
-	  m_awaitingHello(TRUE), m_wasControlling(FALSE),
+	  // TheSuperHackers @feature agentbridge protocol v1 handshake (M3)
+	  m_awaitingHello(TRUE),
 	  m_agentPlayerIndex(-1), m_lastApplied(0) {}
 
 AgentBridge::~AgentBridge() { closeClient();
@@ -68,6 +68,9 @@ void AgentBridge::reset() {
 	// TheSuperHackers @feature agentbridge fresh sessions report a clean last_action (M4)
 	m_lastApplied = 0;
 	m_lastRejected.clear();
+	// TheSuperHackers @feature agentbridge M6C: a stale controlling flag must never
+	// survive an engine reset into the frame-pacer gate.
+	m_controlling = FALSE;
 }
 void AgentBridge::update() { /* driven via preLogicSync() from GameEngine::update() */ }
 
@@ -373,9 +376,13 @@ Bool AgentBridge::processHello(const AsciiString& helloJson)
 // blocks at every Nth frame to exchange observation/action with the client.
 Bool AgentBridge::preLogicSyncInternal()
 {
+	// TheSuperHackers @feature agentbridge M6C: m_controlling still holds LAST
+	// iteration's result here (the preLogicSync() wrapper overwrites it only after
+	// this function returns) — captured once, it replaces the former m_wasControlling.
+	const Bool wasControlling = m_controlling;
 	if (m_listenSock == ~0u) return FALSE;                       // bridge not listening
 	acceptClientIfWaiting();                                     // opportunistic, non-blocking
-	if (m_clientSock == ~0u) { m_wasControlling = FALSE; return FALSE; }
+	if (m_clientSock == ~0u) return FALSE;
 
 	// TheSuperHackers @feature agentbridge envelope: interactive offline game,
 	// never during replay playback (would diverge the CRC we verify against).
@@ -383,7 +390,7 @@ Bool AgentBridge::preLogicSyncInternal()
 		&& !TheGameLogic->isInReplayGame() && TheNetwork == NULL;
 	if (!gateOpen)
 	{
-		if (m_wasControlling)
+		if (wasControlling)
 		{
 			// game ended while a client was attached: final done notification
 			AsciiString bye;
@@ -392,7 +399,6 @@ Bool AgentBridge::preLogicSyncInternal()
 			sendJson(bye);
 			closeClient();
 		}
-		m_wasControlling = FALSE;
 		return FALSE;
 	}
 
@@ -402,25 +408,23 @@ Bool AgentBridge::preLogicSyncInternal()
 		if (m_awaitingHello)
 		{
 			AsciiString hello;
-			if (!recvJson(hello)) { closeClient(); m_wasControlling = FALSE; return FALSE; }
+			if (!recvJson(hello)) { closeClient(); return FALSE; }
 			if (!processHello(hello))
 			{
 				sendJson(AsciiString("{\"error\":\"bad_hello\",\"expect_schema\":1}"));
 				closeClient();
-				m_wasControlling = FALSE;
 				return FALSE;
 			}
 			m_awaitingHello = FALSE;
 		}
 		std::string obs = buildObservation();
-		if (!sendJson(obs.data(), (unsigned int)obs.size())) { closeClient(); m_wasControlling = FALSE; return FALSE; }
+		if (!sendJson(obs.data(), (unsigned int)obs.size())) { closeClient(); return FALSE; }
 		AsciiString cmd;
-		if (!recvJson(cmd)) { closeClient(); m_wasControlling = FALSE; return FALSE; }
+		if (!recvJson(cmd)) { closeClient(); return FALSE; }
 		applyActions(cmd);
 		m_framesSinceStep = 0;
 		m_awaitingFirstStep = FALSE;
 	}
-	m_wasControlling = TRUE;
 	return TRUE;   // force exactly one logic frame this iteration (bypass pacer)
 }
 
