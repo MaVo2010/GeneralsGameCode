@@ -28,7 +28,7 @@ AgentBridge* TheAgentBridge = NULL;
 static Bool s_winsockUp = FALSE;
 
 AgentBridge::AgentBridge()
-	: m_listenSock(~0u), m_clientSock(~0u), m_framesPerStep(5),
+	: m_listenSock(~0u), m_clientSock(~0u), m_framesPerStep(5), m_controlling(FALSE),
 	  m_framesSinceStep(0), m_awaitingFirstStep(TRUE),
 	  // TheSuperHackers @feature agentbridge protocol v1 handshake + gate edge state (M3)
 	  m_awaitingHello(TRUE), m_wasControlling(FALSE),
@@ -73,6 +73,9 @@ void AgentBridge::update() { /* driven via preLogicSync() from GameEngine::updat
 
 void AgentBridge::closeClient() {
 	if (m_clientSock != ~0u) { closesocket((SOCKET)m_clientSock); m_clientSock = ~0u; }
+	// TheSuperHackers @feature agentbridge M6: pacer must resume immediately on disconnect,
+	// even if no further preLogicSync() runs before the next frame's pacer gate.
+	m_controlling = FALSE;
 }
 
 Bool AgentBridge::acceptClientIfWaiting() {
@@ -368,7 +371,7 @@ Bool AgentBridge::processHello(const AsciiString& helloJson)
 // normally — menus stay responsive and you can start a skirmish before/while a
 // client is attached. When controlling, it forces one logic frame per call and
 // blocks at every Nth frame to exchange observation/action with the client.
-Bool AgentBridge::preLogicSync()
+Bool AgentBridge::preLogicSyncInternal()
 {
 	if (m_listenSock == ~0u) return FALSE;                       // bridge not listening
 	acceptClientIfWaiting();                                     // opportunistic, non-blocking
@@ -419,6 +422,14 @@ Bool AgentBridge::preLogicSync()
 	}
 	m_wasControlling = TRUE;
 	return TRUE;   // force exactly one logic frame this iteration (bypass pacer)
+}
+
+Bool AgentBridge::preLogicSync()
+{
+	// TheSuperHackers @feature agentbridge record the controlling state for the
+	// frame-pacer gate in GameEngine::execute().
+	m_controlling = preLogicSyncInternal();
+	return m_controlling;
 }
 
 #endif // RTS_BUILD_AGENT_BRIDGE

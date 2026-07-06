@@ -1107,7 +1107,18 @@ void GameEngine::execute()
 				}
 			}
 
+#if RTS_BUILD_AGENT_BRIDGE
+			// TheSuperHackers @feature agentbridge headless uncap: skip wall-clock frame
+			// pacing while the bridge client drives the lockstep, so the N frames of a
+			// step() run back-to-back at CPU speed. Same frames, less sleeping — the
+			// simulation stays frame-count-driven and byte-deterministic. Without a
+			// connected client (boot, between episodes) normal pacing keeps real time,
+			// which pins the reset frame exactly as before.
+			if (!(TheGlobalData->m_headless && TheAgentBridge && TheAgentBridge->isControllingClock()))
+				TheFramePacer->update();
+#else
 			TheFramePacer->update();
+#endif
 		}
 
 #ifdef PERF_TIMERS
