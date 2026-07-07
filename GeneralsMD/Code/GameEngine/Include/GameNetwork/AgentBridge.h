@@ -19,6 +19,9 @@ public:
 	virtual void reset();
 	virtual void update();   // ticked manually from GameEngine::update()
 
+	// TheSuperHackers @feature agentbridge M7: game-teardown notification (bye + result)
+	void onGameEnding();
+
 	Bool isActive() const { return m_listenSock != ~0u; }
 
 	// TheSuperHackers @feature agentbridge TRUE while a connected client drives the

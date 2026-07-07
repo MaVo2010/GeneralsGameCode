@@ -173,6 +173,19 @@ static void appendUnitJson(Object* obj, void* ud) {
 	b->first = FALSE;
 }
 
+// M7: "win"/"lose" once TheVictoryConditions has decided, NULL while undecided.
+// Draw edge (both defeated same frame): reads as "lose" by design (SPEC-M7).
+static const char* victoryResultString(Player* agent)
+{
+	if (!agent || !TheVictoryConditions)
+		return NULL;
+	if (TheVictoryConditions->hasAchievedVictory(agent))
+		return "win";
+	if (TheVictoryConditions->hasBeenDefeated(agent))
+		return "lose";
+	return NULL;
+}
+
 // M1: full observation — agent player's units, shroud-filtered enemy units, resources.
 std::string AgentBridge::buildObservation() {
 	// TheSuperHackers @feature agentbridge guard ThePlayerList: NULL -> agent stays NULL,
@@ -184,8 +197,8 @@ std::string AgentBridge::buildObservation() {
 
 	std::string out;
 	AsciiString head;
-	// TheSuperHackers @feature agentbridge schema 1: honest last_action + done (M3, DESIGN §8)
-	head.format("{\"schema\":1,\"frame\":%u,\"player\":{\"id\":%d,\"money\":%u,\"power_produced\":%d,\"power_used\":%d},",
+	// TheSuperHackers @feature agentbridge M7 schema 2: adds top-level result (win/lose/null) in the tail
+	head.format("{\"schema\":2,\"frame\":%u,\"player\":{\"id\":%d,\"money\":%u,\"power_produced\":%d,\"power_used\":%d},",
 		TheGameLogic ? TheGameLogic->getFrame() : 0, viewer,
 		agent ? agent->getMoney()->countMoney() : 0,
 		agent ? agent->getEnergy()->getProduction() : 0,
@@ -227,9 +240,35 @@ std::string AgentBridge::buildObservation() {
 	Bool done = FALSE;
 	if (agent && TheVictoryConditions)
 		done = TheVictoryConditions->hasAchievedVictory(agent) || TheVictoryConditions->hasBeenDefeated(agent);
-	out.append(done ? "]},\"done\":true}" : "]},\"done\":false}");
+	// TheSuperHackers @feature agentbridge M7 v2 tail: result (win/lose/null) precedes done
+	const char* result = victoryResultString(agent);
+	tail.format(",\"result\":%s%s%s,\"done\":%s}",
+		result ? "\"" : "", result ? result : "null", result ? "\"" : "",
+		done ? "true" : "false");
+	out.append("]}");                 // close rejected array + last_action object
+	out.append(tail.str());
 	return out;
 }
+
+// TheSuperHackers @feature agentbridge M7: teardown notification (bye + win/lose result).
+void AgentBridge::onGameEnding()
+{
+	// M7: fires from GameEngine::reset() BEFORE subsystems reset — frame and
+	// victory state are still readable here (VictoryConditions resets later).
+	if (m_clientSock == ~0u)
+		return;                                   // no client attached
+	if (!TheGameLogic || !TheGameLogic->isInGame())
+		return;                                   // save/load or non-game reset
+	Player* agent = ThePlayerList ? ThePlayerList->getLocalPlayer() : NULL;
+	const char* result = victoryResultString(agent);
+	AsciiString bye;
+	bye.format("{\"schema\":2,\"frame\":%u,\"done\":true,\"result\":%s%s%s}",
+		TheGameLogic->getFrame(),
+		result ? "\"" : "", result ? result : "null", result ? "\"" : "");
+	sendJson(bye);
+	closeClient();
+}
+
 // TheSuperHackers @feature agentbridge validate one action and inject it via the
 // player message path. Returns NULL when injected, else a static reason string.
 const char* AgentBridge::applyOneAction(const AgentJsonValue& action, Player* agent)
@@ -360,7 +399,7 @@ Bool AgentBridge::processHello(const AsciiString& helloJson)
 	const AgentJsonValue* cmd = root.getMember("cmd");
 	if (!cmd || !cmd->isString() || cmd->asString() != "hello") return FALSE;
 	const AgentJsonValue* schema = root.getMember("schema");
-	if (!schema || !schema->isNumber() || schema->asNumber() != 1.0) return FALSE;
+	if (!schema || !schema->isNumber() || schema->asNumber() != 2.0) return FALSE;
 	const AgentJsonValue* fps = root.getMember("frames_per_step");
 	if (!fps || !fps->isNumber()) return FALSE;
 	double n = fps->asNumber();
@@ -376,10 +415,6 @@ Bool AgentBridge::processHello(const AsciiString& helloJson)
 // blocks at every Nth frame to exchange observation/action with the client.
 Bool AgentBridge::preLogicSyncInternal()
 {
-	// TheSuperHackers @feature agentbridge M6C: m_controlling still holds LAST
-	// iteration's result here (the preLogicSync() wrapper overwrites it only after
-	// this function returns) — captured once, it replaces the former m_wasControlling.
-	const Bool wasControlling = m_controlling;
 	if (m_listenSock == ~0u) return FALSE;                       // bridge not listening
 	acceptClientIfWaiting();                                     // opportunistic, non-blocking
 	if (m_clientSock == ~0u) return FALSE;
@@ -389,18 +424,7 @@ Bool AgentBridge::preLogicSyncInternal()
 	Bool gateOpen = TheGameLogic && TheGameLogic->isInInteractiveGame()
 		&& !TheGameLogic->isInReplayGame() && TheNetwork == NULL;
 	if (!gateOpen)
-	{
-		if (wasControlling)
-		{
-			// game ended while a client was attached: final done notification
-			AsciiString bye;
-			bye.format("{\"schema\":1,\"frame\":%u,\"done\":true}",
-				TheGameLogic ? TheGameLogic->getFrame() : 0);
-			sendJson(bye);
-			closeClient();
-		}
-		return FALSE;
-	}
+		return FALSE;      // M7: teardown bye now fires from onGameEnding()
 
 	m_framesSinceStep++;
 	if (m_awaitingFirstStep || m_framesSinceStep >= m_framesPerStep)
@@ -411,7 +435,7 @@ Bool AgentBridge::preLogicSyncInternal()
 			if (!recvJson(hello)) { closeClient(); return FALSE; }
 			if (!processHello(hello))
 			{
-				sendJson(AsciiString("{\"error\":\"bad_hello\",\"expect_schema\":1}"));
+				sendJson(AsciiString("{\"error\":\"bad_hello\",\"expect_schema\":2}"));
 				closeClient();
 				return FALSE;
 			}
