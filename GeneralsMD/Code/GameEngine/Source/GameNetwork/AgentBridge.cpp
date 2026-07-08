@@ -21,6 +21,10 @@
 #include "GameLogic/TerrainLogic.h"
 // TheSuperHackers @feature agentbridge done flag from TheVictoryConditions (M3)
 #include "GameLogic/VictoryConditions.h"
+// TheSuperHackers @feature agentbridge M7 v2 own-unit economy extras: construction/production/build_options
+#include "GameClient/ControlBar.h"
+#include "Common/BuildAssistant.h"
+#include "GameLogic/Module/ProductionUpdate.h"
 #include <winsock.h>
 
 AgentBridge* TheAgentBridge = NULL;
@@ -146,6 +150,63 @@ Bool AgentBridge::sendJson(const AsciiString& json) {
 // large armies would overflow it, so the accumulator must be unbounded.
 struct ObsBuilder { std::string* out; Int viewerIndex; Bool wantEnemies; Bool first; Int ownerIndex; };
 
+// M7: own-unit economy extras (v2). Appends nothing when not applicable.
+static void appendOwnUnitExtrasJson(Object* obj, std::string* out)
+{
+	AsciiString piece;
+	if (obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION))
+	{
+		piece.format(",\"under_construction\":true,\"construction_pct\":%.1f",
+			obj->getConstructionPercent());
+		out->append(piece.str());
+	}
+	ProductionUpdateInterface* pu = obj->getProductionUpdateInterface();
+	if (pu && pu->getProductionCount() > 0)
+	{
+		out->append(",\"production\":[");
+		Bool first = TRUE;
+		for (const ProductionEntry* e = pu->firstProduction(); e; e = pu->nextProduction(e))
+		{
+			if (!e->getProductionObject()) continue;
+			piece.format("%s{\"kind\":\"%s\",\"pct\":%.1f}", first ? "" : ",",
+				e->getProductionObject()->getName().str(), e->getPercentComplete());
+			out->append(piece.str());
+			first = FALSE;
+		}
+		out->append("]");
+	}
+	if (TheControlBar && TheBuildAssistant && !obj->getCommandSetString().isEmpty())
+	{
+		const CommandSet* cs = TheControlBar->findCommandSet(obj->getCommandSetString());
+		if (cs)
+		{
+			std::string opts;
+			Bool any = FALSE;
+			for (Int i = 0; i < MAX_COMMANDS_PER_SET; ++i)
+			{
+				const CommandButton* btn = cs->getCommandButton(i);
+				if (!btn) continue;
+				if (btn->getCommandType() != GUI_COMMAND_UNIT_BUILD
+						&& btn->getCommandType() != GUI_COMMAND_DOZER_CONSTRUCT) continue;
+				const ThingTemplate* tt = btn->getThingTemplate();
+				if (!tt) continue;
+				Bool ok = (TheBuildAssistant->canMakeUnit(obj, tt) == CANMAKE_OK);
+				piece.format("%s{\"kind\":\"%s\",\"cost\":%d,\"ok\":%s}", any ? "," : "",
+					tt->getName().str(), tt->calcCostToBuild(obj->getControllingPlayer()),
+					ok ? "true" : "false");
+				opts.append(piece.str());
+				any = TRUE;
+			}
+			if (any)
+			{
+				out->append(",\"build_options\":[");
+				out->append(opts);
+				out->append("]");
+			}
+		}
+	}
+}
+
 static void appendUnitJson(Object* obj, void* ud) {
 	ObsBuilder* b = (ObsBuilder*)ud;
 	if (obj == NULL) return;
@@ -165,11 +226,17 @@ static void appendUnitJson(Object* obj, void* ud) {
 			b->first ? "" : ",", (unsigned int)obj->getID(), kind, p->x, p->y, p->z, hp, maxhp,
 			(ai && ai->isMoving()) ? "true" : "false", b->ownerIndex);
 	} else {
-		entry.format("%s{\"id\":%u,\"kind\":\"%s\",\"pos\":[%.1f,%.1f,%.1f],\"hp\":%.0f,\"maxhp\":%.0f,\"moving\":%s}",
+		// M7 v2: own units omit the closing brace here so appendOwnUnitExtrasJson can add
+		// economy fields before it; the enemy branch above keeps its brace (byte-identical).
+		entry.format("%s{\"id\":%u,\"kind\":\"%s\",\"pos\":[%.1f,%.1f,%.1f],\"hp\":%.0f,\"maxhp\":%.0f,\"moving\":%s",
 			b->first ? "" : ",", (unsigned int)obj->getID(), kind, p->x, p->y, p->z, hp, maxhp,
 			(ai && ai->isMoving()) ? "true" : "false");
 	}
 	b->out->append(entry.str());
+	if (!b->wantEnemies) {
+		appendOwnUnitExtrasJson(obj, b->out);
+		b->out->append("}");
+	}
 	b->first = FALSE;
 }
 
