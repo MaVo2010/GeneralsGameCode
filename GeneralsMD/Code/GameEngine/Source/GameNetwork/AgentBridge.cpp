@@ -25,6 +25,8 @@
 #include "GameClient/ControlBar.h"
 #include "Common/BuildAssistant.h"
 #include "GameLogic/Module/ProductionUpdate.h"
+// TheSuperHackers @feature agentbridge M7 v2 build/train verbs: resolve kind name -> ThingTemplate
+#include "Common/ThingFactory.h"
 #include <winsock.h>
 
 AgentBridge* TheAgentBridge = NULL;
@@ -349,7 +351,10 @@ const char* AgentBridge::applyOneAction(const AgentJsonValue& action, Player* ag
 	Bool isAttack = (t == "attack");
 	Bool isAttackMove = (t == "attack_move");
 	Bool isStop = (t == "stop");
-	if (!isMove && !isAttack && !isAttackMove && !isStop) return "unknown_type";
+	// TheSuperHackers @feature agentbridge M7 v2 verbs: dozer build + producer train
+	Bool isBuild = (t == "build");
+	Bool isTrain = (t == "train");
+	if (!isMove && !isAttack && !isAttackMove && !isStop && !isBuild && !isTrain) return "unknown_type";
 
 	const AgentJsonValue* unitVal = action.getMember("unit");
 	if (!unitVal || !unitVal->isNumber()) return "bad_args";
@@ -361,6 +366,75 @@ const char* AgentBridge::applyOneAction(const AgentJsonValue& action, Player* ag
 	Object* obj = TheGameLogic->findObjectByID(unitId);
 	if (!obj) return "no_such_unit";
 	if (obj->getControllingPlayer() != agent) return "not_owned";
+
+	// TheSuperHackers @feature agentbridge M7 v2 build/train: resolve kind->template and inject
+	// select-then-act BEFORE the no_ai check — buildings have no AIUpdateInterface, so the no_ai
+	// reject below only applies to move/attack/attack_move/stop. Injection is message-only
+	// (MSG_CREATE_SELECTED_GROUP + network-range order), CRC-safe like the v1 verbs.
+	if (isBuild || isTrain)
+	{
+		const AgentJsonValue* kindV = action.getMember("kind");
+		if (!kindV || !kindV->isString()) return "bad_args";
+		// check=FALSE: a bad name must NOT trip findTemplate's DEBUG_CRASH in debug builds.
+		const ThingTemplate* tt = TheThingFactory
+			? TheThingFactory->findTemplate(AsciiString(kindV->asString().c_str()), FALSE)
+			: NULL;
+		if (!tt) return "unknown_kind";
+
+		if (isTrain)
+		{
+			// Reject a missing PU interface BEFORE injecting: onQueueUnitCreate DEBUG_CRASHes
+			// if the producer lacks one.
+			ProductionUpdateInterface* pu = obj->getProductionUpdateInterface();
+			if (!pu) return "no_production";
+			if (!TheBuildAssistant || TheBuildAssistant->canMakeUnit(obj, tt) != CANMAKE_OK)
+				return "cannot_build";
+			ProductionID pid = pu->requestUniqueUnitID(); // in-process, UI-identical -> replay-safe
+			GameMessage* sel = TheMessageStream->appendMessage(GameMessage::MSG_CREATE_SELECTED_GROUP);
+			sel->appendBooleanArgument(TRUE);
+			sel->appendObjectIDArgument(obj->getID());
+			GameMessage* msg = TheMessageStream->appendMessage(GameMessage::MSG_QUEUE_UNIT_CREATE);
+			msg->appendIntegerArgument(tt->getTemplateID());
+			msg->appendIntegerArgument((Int)pid);
+			return NULL;
+		}
+
+		// build: only a dozer constructs structures.
+		if (!obj->isKindOf(KINDOF_DOZER)) return "cannot_build";
+		// pos parse + terrain-extent reject — mirrors the move-verb block (incl. NaN guard).
+		const AgentJsonValue* pos = action.getMember("pos");
+		if (!pos || !pos->isArray() || pos->size() < 2) return "bad_args";
+		const AgentJsonValue* px = pos->at(0);
+		const AgentJsonValue* py = pos->at(1);
+		if (!px || !py || !px->isNumber() || !py->isNumber()) return "bad_args";
+		Real bx = (Real)px->asNumber();
+		Real by = (Real)py->asNumber();
+		if (!(bx == bx) || !(by == by)) return "bad_args"; // NaN guard
+		Region3D bextent;
+		TheTerrainLogic->getExtent(&bextent);
+		if (bx < bextent.lo.x || bx > bextent.hi.x || by < bextent.lo.y || by > bextent.hi.y)
+			return "bad_target";
+		Coord3D loc;
+		loc.set(bx, by, 0.0f);
+		if (!TheBuildAssistant || TheBuildAssistant->canMakeUnit(obj, tt) != CANMAKE_OK)
+			return "cannot_build";
+		// Exact flag set from PlaceEventTranslator.cpp:230-236 (the UI placement click).
+		UnsignedInt lb = BuildAssistant::USE_QUICK_PATHFIND | BuildAssistant::TERRAIN_RESTRICTIONS
+			| BuildAssistant::CLEAR_PATH | BuildAssistant::NO_OBJECT_OVERLAP
+			| BuildAssistant::SHROUD_REVEALED | BuildAssistant::IGNORE_STEALTHED
+			| BuildAssistant::FAIL_STEALTHED_WITHOUT_FEEDBACK;
+		if (TheBuildAssistant->isLocationLegalToBuild(&loc, tt, 0.0f, lb, obj, NULL) != LBC_OK)
+			return "bad_target";
+		GameMessage* sel = TheMessageStream->appendMessage(GameMessage::MSG_CREATE_SELECTED_GROUP);
+		sel->appendBooleanArgument(TRUE);
+		sel->appendObjectIDArgument(obj->getID());
+		GameMessage* msg = TheMessageStream->appendMessage(GameMessage::MSG_DOZER_CONSTRUCT);
+		msg->appendIntegerArgument(tt->getTemplateID());
+		msg->appendLocationArgument(loc);
+		msg->appendRealArgument(0.0f); // angle fixed 0 (SPEC-M7; not on the wire)
+		return NULL;
+	}
+
 	if (!obj->getAIUpdateInterface()) return "no_ai";
 
 	Coord3D dest;
