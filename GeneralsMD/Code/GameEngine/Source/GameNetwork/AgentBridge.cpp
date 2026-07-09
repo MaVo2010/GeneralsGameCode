@@ -21,6 +21,12 @@
 #include "GameLogic/TerrainLogic.h"
 // TheSuperHackers @feature agentbridge done flag from TheVictoryConditions (M3)
 #include "GameLogic/VictoryConditions.h"
+// TheSuperHackers @feature agentbridge M7 v2 own-unit economy extras: construction/production/build_options
+#include "GameClient/ControlBar.h"
+#include "Common/BuildAssistant.h"
+#include "GameLogic/Module/ProductionUpdate.h"
+// TheSuperHackers @feature agentbridge M7 v2 build/train verbs: resolve kind name -> ThingTemplate
+#include "Common/ThingFactory.h"
 #include <winsock.h>
 
 AgentBridge* TheAgentBridge = NULL;
@@ -146,6 +152,63 @@ Bool AgentBridge::sendJson(const AsciiString& json) {
 // large armies would overflow it, so the accumulator must be unbounded.
 struct ObsBuilder { std::string* out; Int viewerIndex; Bool wantEnemies; Bool first; Int ownerIndex; };
 
+// M7: own-unit economy extras (v2). Appends nothing when not applicable.
+static void appendOwnUnitExtrasJson(Object* obj, std::string* out)
+{
+	AsciiString piece;
+	if (obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION))
+	{
+		piece.format(",\"under_construction\":true,\"construction_pct\":%.1f",
+			obj->getConstructionPercent());
+		out->append(piece.str());
+	}
+	ProductionUpdateInterface* pu = obj->getProductionUpdateInterface();
+	if (pu && pu->getProductionCount() > 0)
+	{
+		out->append(",\"production\":[");
+		Bool first = TRUE;
+		for (const ProductionEntry* e = pu->firstProduction(); e; e = pu->nextProduction(e))
+		{
+			if (!e->getProductionObject()) continue;
+			piece.format("%s{\"kind\":\"%s\",\"pct\":%.1f}", first ? "" : ",",
+				e->getProductionObject()->getName().str(), e->getPercentComplete());
+			out->append(piece.str());
+			first = FALSE;
+		}
+		out->append("]");
+	}
+	if (TheControlBar && TheBuildAssistant && !obj->getCommandSetString().isEmpty())
+	{
+		const CommandSet* cs = TheControlBar->findCommandSet(obj->getCommandSetString());
+		if (cs)
+		{
+			std::string opts;
+			Bool any = FALSE;
+			for (Int i = 0; i < MAX_COMMANDS_PER_SET; ++i)
+			{
+				const CommandButton* btn = cs->getCommandButton(i);
+				if (!btn) continue;
+				if (btn->getCommandType() != GUI_COMMAND_UNIT_BUILD
+						&& btn->getCommandType() != GUI_COMMAND_DOZER_CONSTRUCT) continue;
+				const ThingTemplate* tt = btn->getThingTemplate();
+				if (!tt) continue;
+				Bool ok = (TheBuildAssistant->canMakeUnit(obj, tt) == CANMAKE_OK);
+				piece.format("%s{\"kind\":\"%s\",\"cost\":%d,\"ok\":%s}", any ? "," : "",
+					tt->getName().str(), tt->calcCostToBuild(obj->getControllingPlayer()),
+					ok ? "true" : "false");
+				opts.append(piece.str());
+				any = TRUE;
+			}
+			if (any)
+			{
+				out->append(",\"build_options\":[");
+				out->append(opts);
+				out->append("]");
+			}
+		}
+	}
+}
+
 static void appendUnitJson(Object* obj, void* ud) {
 	ObsBuilder* b = (ObsBuilder*)ud;
 	if (obj == NULL) return;
@@ -165,12 +228,31 @@ static void appendUnitJson(Object* obj, void* ud) {
 			b->first ? "" : ",", (unsigned int)obj->getID(), kind, p->x, p->y, p->z, hp, maxhp,
 			(ai && ai->isMoving()) ? "true" : "false", b->ownerIndex);
 	} else {
-		entry.format("%s{\"id\":%u,\"kind\":\"%s\",\"pos\":[%.1f,%.1f,%.1f],\"hp\":%.0f,\"maxhp\":%.0f,\"moving\":%s}",
+		// M7 v2: own units omit the closing brace here so appendOwnUnitExtrasJson can add
+		// economy fields before it; the enemy branch above keeps its brace (byte-identical).
+		entry.format("%s{\"id\":%u,\"kind\":\"%s\",\"pos\":[%.1f,%.1f,%.1f],\"hp\":%.0f,\"maxhp\":%.0f,\"moving\":%s",
 			b->first ? "" : ",", (unsigned int)obj->getID(), kind, p->x, p->y, p->z, hp, maxhp,
 			(ai && ai->isMoving()) ? "true" : "false");
 	}
 	b->out->append(entry.str());
+	if (!b->wantEnemies) {
+		appendOwnUnitExtrasJson(obj, b->out);
+		b->out->append("}");
+	}
 	b->first = FALSE;
+}
+
+// M7: "win"/"lose" once TheVictoryConditions has decided, NULL while undecided.
+// Draw edge (both defeated same frame): reads as "lose" by design (SPEC-M7).
+static const char* victoryResultString(Player* agent)
+{
+	if (!agent || !TheVictoryConditions)
+		return NULL;
+	if (TheVictoryConditions->hasAchievedVictory(agent))
+		return "win";
+	if (TheVictoryConditions->hasBeenDefeated(agent))
+		return "lose";
+	return NULL;
 }
 
 // M1: full observation — agent player's units, shroud-filtered enemy units, resources.
@@ -184,8 +266,8 @@ std::string AgentBridge::buildObservation() {
 
 	std::string out;
 	AsciiString head;
-	// TheSuperHackers @feature agentbridge schema 1: honest last_action + done (M3, DESIGN §8)
-	head.format("{\"schema\":1,\"frame\":%u,\"player\":{\"id\":%d,\"money\":%u,\"power_produced\":%d,\"power_used\":%d},",
+	// TheSuperHackers @feature agentbridge M7 schema 2: adds top-level result (win/lose/null) in the tail
+	head.format("{\"schema\":2,\"frame\":%u,\"player\":{\"id\":%d,\"money\":%u,\"power_produced\":%d,\"power_used\":%d},",
 		TheGameLogic ? TheGameLogic->getFrame() : 0, viewer,
 		agent ? agent->getMoney()->countMoney() : 0,
 		agent ? agent->getEnergy()->getProduction() : 0,
@@ -227,9 +309,35 @@ std::string AgentBridge::buildObservation() {
 	Bool done = FALSE;
 	if (agent && TheVictoryConditions)
 		done = TheVictoryConditions->hasAchievedVictory(agent) || TheVictoryConditions->hasBeenDefeated(agent);
-	out.append(done ? "]},\"done\":true}" : "]},\"done\":false}");
+	// TheSuperHackers @feature agentbridge M7 v2 tail: result (win/lose/null) precedes done
+	const char* result = victoryResultString(agent);
+	tail.format(",\"result\":%s%s%s,\"done\":%s}",
+		result ? "\"" : "", result ? result : "null", result ? "\"" : "",
+		done ? "true" : "false");
+	out.append("]}");                 // close rejected array + last_action object
+	out.append(tail.str());
 	return out;
 }
+
+// TheSuperHackers @feature agentbridge M7: teardown notification (bye + win/lose result).
+void AgentBridge::onGameEnding()
+{
+	// M7: fires from GameEngine::reset() BEFORE subsystems reset — frame and
+	// victory state are still readable here (VictoryConditions resets later).
+	if (m_clientSock == ~0u)
+		return;                                   // no client attached
+	if (!TheGameLogic || !TheGameLogic->isInGame())
+		return;                                   // save/load or non-game reset
+	Player* agent = ThePlayerList ? ThePlayerList->getLocalPlayer() : NULL;
+	const char* result = victoryResultString(agent);
+	AsciiString bye;
+	bye.format("{\"schema\":2,\"frame\":%u,\"done\":true,\"result\":%s%s%s}",
+		TheGameLogic->getFrame(),
+		result ? "\"" : "", result ? result : "null", result ? "\"" : "");
+	sendJson(bye);
+	closeClient();
+}
+
 // TheSuperHackers @feature agentbridge validate one action and inject it via the
 // player message path. Returns NULL when injected, else a static reason string.
 const char* AgentBridge::applyOneAction(const AgentJsonValue& action, Player* agent)
@@ -243,7 +351,10 @@ const char* AgentBridge::applyOneAction(const AgentJsonValue& action, Player* ag
 	Bool isAttack = (t == "attack");
 	Bool isAttackMove = (t == "attack_move");
 	Bool isStop = (t == "stop");
-	if (!isMove && !isAttack && !isAttackMove && !isStop) return "unknown_type";
+	// TheSuperHackers @feature agentbridge M7 v2 verbs: dozer build + producer train
+	Bool isBuild = (t == "build");
+	Bool isTrain = (t == "train");
+	if (!isMove && !isAttack && !isAttackMove && !isStop && !isBuild && !isTrain) return "unknown_type";
 
 	const AgentJsonValue* unitVal = action.getMember("unit");
 	if (!unitVal || !unitVal->isNumber()) return "bad_args";
@@ -255,6 +366,75 @@ const char* AgentBridge::applyOneAction(const AgentJsonValue& action, Player* ag
 	Object* obj = TheGameLogic->findObjectByID(unitId);
 	if (!obj) return "no_such_unit";
 	if (obj->getControllingPlayer() != agent) return "not_owned";
+
+	// TheSuperHackers @feature agentbridge M7 v2 build/train: resolve kind->template and inject
+	// select-then-act BEFORE the no_ai check — buildings have no AIUpdateInterface, so the no_ai
+	// reject below only applies to move/attack/attack_move/stop. Injection is message-only
+	// (MSG_CREATE_SELECTED_GROUP + network-range order), CRC-safe like the v1 verbs.
+	if (isBuild || isTrain)
+	{
+		const AgentJsonValue* kindV = action.getMember("kind");
+		if (!kindV || !kindV->isString()) return "bad_args";
+		// check=FALSE: a bad name must NOT trip findTemplate's DEBUG_CRASH in debug builds.
+		const ThingTemplate* tt = TheThingFactory
+			? TheThingFactory->findTemplate(AsciiString(kindV->asString().c_str()), FALSE)
+			: NULL;
+		if (!tt) return "unknown_kind";
+
+		if (isTrain)
+		{
+			// Reject a missing PU interface BEFORE injecting: onQueueUnitCreate DEBUG_CRASHes
+			// if the producer lacks one.
+			ProductionUpdateInterface* pu = obj->getProductionUpdateInterface();
+			if (!pu) return "no_production";
+			if (!TheBuildAssistant || TheBuildAssistant->canMakeUnit(obj, tt) != CANMAKE_OK)
+				return "cannot_build";
+			ProductionID pid = pu->requestUniqueUnitID(); // in-process, UI-identical -> replay-safe
+			GameMessage* sel = TheMessageStream->appendMessage(GameMessage::MSG_CREATE_SELECTED_GROUP);
+			sel->appendBooleanArgument(TRUE);
+			sel->appendObjectIDArgument(obj->getID());
+			GameMessage* msg = TheMessageStream->appendMessage(GameMessage::MSG_QUEUE_UNIT_CREATE);
+			msg->appendIntegerArgument(tt->getTemplateID());
+			msg->appendIntegerArgument((Int)pid);
+			return NULL;
+		}
+
+		// build: only a dozer constructs structures.
+		if (!obj->isKindOf(KINDOF_DOZER)) return "cannot_build";
+		// pos parse + terrain-extent reject — mirrors the move-verb block (incl. NaN guard).
+		const AgentJsonValue* pos = action.getMember("pos");
+		if (!pos || !pos->isArray() || pos->size() < 2) return "bad_args";
+		const AgentJsonValue* px = pos->at(0);
+		const AgentJsonValue* py = pos->at(1);
+		if (!px || !py || !px->isNumber() || !py->isNumber()) return "bad_args";
+		Real bx = (Real)px->asNumber();
+		Real by = (Real)py->asNumber();
+		if (!(bx == bx) || !(by == by)) return "bad_args"; // NaN guard
+		Region3D bextent;
+		TheTerrainLogic->getExtent(&bextent);
+		if (bx < bextent.lo.x || bx > bextent.hi.x || by < bextent.lo.y || by > bextent.hi.y)
+			return "bad_target";
+		Coord3D loc;
+		loc.set(bx, by, 0.0f);
+		if (!TheBuildAssistant || TheBuildAssistant->canMakeUnit(obj, tt) != CANMAKE_OK)
+			return "cannot_build";
+		// Exact flag set from PlaceEventTranslator.cpp:230-236 (the UI placement click).
+		UnsignedInt lb = BuildAssistant::USE_QUICK_PATHFIND | BuildAssistant::TERRAIN_RESTRICTIONS
+			| BuildAssistant::CLEAR_PATH | BuildAssistant::NO_OBJECT_OVERLAP
+			| BuildAssistant::SHROUD_REVEALED | BuildAssistant::IGNORE_STEALTHED
+			| BuildAssistant::FAIL_STEALTHED_WITHOUT_FEEDBACK;
+		if (TheBuildAssistant->isLocationLegalToBuild(&loc, tt, 0.0f, lb, obj, NULL) != LBC_OK)
+			return "bad_target";
+		GameMessage* sel = TheMessageStream->appendMessage(GameMessage::MSG_CREATE_SELECTED_GROUP);
+		sel->appendBooleanArgument(TRUE);
+		sel->appendObjectIDArgument(obj->getID());
+		GameMessage* msg = TheMessageStream->appendMessage(GameMessage::MSG_DOZER_CONSTRUCT);
+		msg->appendIntegerArgument(tt->getTemplateID());
+		msg->appendLocationArgument(loc);
+		msg->appendRealArgument(0.0f); // angle fixed 0 (SPEC-M7; not on the wire)
+		return NULL;
+	}
+
 	if (!obj->getAIUpdateInterface()) return "no_ai";
 
 	Coord3D dest;
@@ -360,7 +540,7 @@ Bool AgentBridge::processHello(const AsciiString& helloJson)
 	const AgentJsonValue* cmd = root.getMember("cmd");
 	if (!cmd || !cmd->isString() || cmd->asString() != "hello") return FALSE;
 	const AgentJsonValue* schema = root.getMember("schema");
-	if (!schema || !schema->isNumber() || schema->asNumber() != 1.0) return FALSE;
+	if (!schema || !schema->isNumber() || schema->asNumber() != 2.0) return FALSE;
 	const AgentJsonValue* fps = root.getMember("frames_per_step");
 	if (!fps || !fps->isNumber()) return FALSE;
 	double n = fps->asNumber();
@@ -376,10 +556,6 @@ Bool AgentBridge::processHello(const AsciiString& helloJson)
 // blocks at every Nth frame to exchange observation/action with the client.
 Bool AgentBridge::preLogicSyncInternal()
 {
-	// TheSuperHackers @feature agentbridge M6C: m_controlling still holds LAST
-	// iteration's result here (the preLogicSync() wrapper overwrites it only after
-	// this function returns) — captured once, it replaces the former m_wasControlling.
-	const Bool wasControlling = m_controlling;
 	if (m_listenSock == ~0u) return FALSE;                       // bridge not listening
 	acceptClientIfWaiting();                                     // opportunistic, non-blocking
 	if (m_clientSock == ~0u) return FALSE;
@@ -389,18 +565,7 @@ Bool AgentBridge::preLogicSyncInternal()
 	Bool gateOpen = TheGameLogic && TheGameLogic->isInInteractiveGame()
 		&& !TheGameLogic->isInReplayGame() && TheNetwork == NULL;
 	if (!gateOpen)
-	{
-		if (wasControlling)
-		{
-			// game ended while a client was attached: final done notification
-			AsciiString bye;
-			bye.format("{\"schema\":1,\"frame\":%u,\"done\":true}",
-				TheGameLogic ? TheGameLogic->getFrame() : 0);
-			sendJson(bye);
-			closeClient();
-		}
-		return FALSE;
-	}
+		return FALSE;      // M7: teardown bye now fires from onGameEnding()
 
 	m_framesSinceStep++;
 	if (m_awaitingFirstStep || m_framesSinceStep >= m_framesPerStep)
@@ -411,7 +576,7 @@ Bool AgentBridge::preLogicSyncInternal()
 			if (!recvJson(hello)) { closeClient(); return FALSE; }
 			if (!processHello(hello))
 			{
-				sendJson(AsciiString("{\"error\":\"bad_hello\",\"expect_schema\":1}"));
+				sendJson(AsciiString("{\"error\":\"bad_hello\",\"expect_schema\":2}"));
 				closeClient();
 				return FALSE;
 			}

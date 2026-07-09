@@ -871,6 +871,13 @@ void GameEngine::reset()
 	if (TheGameLogic->isInMultiplayerGame())
 		deleteNetwork = true;
 
+#if RTS_BUILD_AGENT_BRIDGE
+	// TheSuperHackers @feature agentbridge M7: notify an attached client before the
+	// subsystem resets wipe frame + victory state (bye carries win/lose).
+	if (TheAgentBridge)
+		TheAgentBridge->onGameEnding();
+#endif
+
 	resetSubsystems();
 
 	if (deleteNetwork)
