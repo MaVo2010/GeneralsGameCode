@@ -339,8 +339,13 @@ static void appendCommonUnitExtrasJson(Object* obj, std::string* out)
 			victimId = (UnsignedInt)victim->getID();
 	}
 	AsciiString piece;
-	piece.format(",\"veterancy\":%d,\"vision_range\":%.0f,\"weapon_range\":%.0f,\"target_id\":%u",
-		(Int)obj->getVeterancyLevel(), obj->getVisionRange(), weaponRange, victimId);
+	// "structure" comes straight from KINDOF rather than being guessed client-side from the
+	// kind name. The existing rl-side substring rule only ever knew six unit types from M6/M7
+	// and would classify almost every real building (power plants, war factories, tunnels,
+	// defensive structures) as a mobile unit.
+	piece.format(",\"veterancy\":%d,\"vision_range\":%.0f,\"weapon_range\":%.0f,\"target_id\":%u,\"structure\":%s",
+		(Int)obj->getVeterancyLevel(), obj->getVisionRange(), weaponRange, victimId,
+		obj->isKindOf(KINDOF_STRUCTURE) ? "true" : "false");
 	out->append(piece.str());
 }
 
