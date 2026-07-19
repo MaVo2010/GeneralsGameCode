@@ -53,6 +53,9 @@ private:
 	// TheSuperHackers @feature agentbridge M13: the player an observation/action batch
 	// speaks for. Shared by buildObservation() and applyActions() so both can never disagree.
 	class Player* resolveAgentPlayer();
+	// TheSuperHackers @feature agentbridge M13: one player's units + the hostiles they can
+	// currently see. The observer emits it once per perspective.
+	void appendPlayerViewJson(std::string& out, class Player* p);
 
 	// TheSuperHackers @feature agentbridge per-batch action results for last_action (M3)
 	struct RejectedAction { Int index; const char* reason; };  // reason = static string

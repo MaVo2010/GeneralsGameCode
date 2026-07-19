@@ -355,6 +355,11 @@ public:
 	void resetOrStartSpecialPowerReadyFrame( const SpecialPowerTemplate *temp );
 	///< my new command center wants to init his timers to the status quo
 	UnsignedInt getOrStartSpecialPowerReadyFrame( const SpecialPowerTemplate *temp);
+	// TheSuperHackers @feature agentbridge (M13) side-effect-free sibling of the above: looks up
+	// an existing shared timer and reports whether one was found, instead of creating it. Needed
+	// because getOrStartSpecialPowerReadyFrame() mutates the timer list, which makes it unusable
+	// from any pure-observation path (an observer must never write to GameLogic).
+	Bool peekSpecialPowerReadyFrame( const SpecialPowerTemplate *temp, UnsignedInt *readyFrame ) const;
 	void expressSpecialPowerReadyFrame( const SpecialPowerTemplate *temp, UnsignedInt frame );
 	void addNewSharedSpecialPowerTimer( const SpecialPowerTemplate *temp, UnsignedInt frame );
 
@@ -822,6 +827,8 @@ private:
 
 	typedef std::list<SpecialPowerReadyTimerType> SpecialPowerReadyTimerList;
 	typedef SpecialPowerReadyTimerList::iterator SpecialPowerReadyTimerListIterator;
+	// TheSuperHackers @feature agentbridge (M13) needed by the const peek accessor above
+	typedef SpecialPowerReadyTimerList::const_iterator SpecialPowerReadyTimerListConstIterator;
 	SpecialPowerReadyTimerList m_specialPowerReadyTimerList;
 
 	Squad									*m_squads[NUM_HOTKEY_SQUADS];	///< The hotkeyed squads

@@ -3397,6 +3397,31 @@ UnsignedInt Player::getOrStartSpecialPowerReadyFrame( const SpecialPowerTemplate
 }
 
 //-------------------------------------------------------------------------------------------------
+// TheSuperHackers @feature agentbridge (M13) read-only lookup of a shared special-power timer.
+// Same search as getOrStartSpecialPowerReadyFrame() above, but a miss returns FALSE instead of
+// creating the timer. Observation code needs this: creating a timer as a side effect of looking
+// at it would change the simulation, and a timer created at the wrong frame diverges the CRC.
+//-------------------------------------------------------------------------------------------------
+Bool Player::peekSpecialPowerReadyFrame( const SpecialPowerTemplate *temp, UnsignedInt *readyFrame ) const
+{
+	if( temp == NULL )
+		return FALSE;
+
+	const UnsignedInt lookupID = temp->getID();
+	for( SpecialPowerReadyTimerListConstIterator it = m_specialPowerReadyTimerList.begin();
+			 it != m_specialPowerReadyTimerList.end(); ++it )
+	{
+		if( it->m_templateID == lookupID )
+		{
+			if( readyFrame )
+				*readyFrame = it->m_readyFrame;
+			return TRUE;
+		}
+	}
+	return FALSE;
+}
+
+//-------------------------------------------------------------------------------------------------
 //-------------------------------------------------------------------------------------------------
 void Player::friend_applyDifficultyBonusesForObject(Object* obj, Bool apply) const
 {
