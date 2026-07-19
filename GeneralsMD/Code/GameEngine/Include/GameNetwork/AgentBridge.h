@@ -50,12 +50,21 @@ private:
 	// and wraps structurally past 64K (unsigned short m_numCharsAllocated) — large armies would overflow it.
 	std::string buildObservation();   // filled out in M1
 	void applyActions(const AsciiString& actionsJson); // filled out in M2
+	// TheSuperHackers @feature agentbridge M13: the player an observation/action batch
+	// speaks for. Shared by buildObservation() and applyActions() so both can never disagree.
+	class Player* resolveAgentPlayer();
 
 	// TheSuperHackers @feature agentbridge per-batch action results for last_action (M3)
 	struct RejectedAction { Int index; const char* reason; };  // reason = static string
 	const char* applyOneAction(const class AgentJsonValue& action, class Player* agent);
 	// TheSuperHackers @feature agentbridge protocol v1 handshake (M3, DESIGN §8.1)
 	Bool processHello(const AsciiString& helloJson); // validate + apply hello, FALSE = reject
+
+	// TheSuperHackers @feature agentbridge M13: one place for the per-session state that
+	// reset() and acceptClientIfWaiting() both have to re-arm. Keeping two hand-maintained
+	// copies of that list in sync was the standing trap; a latch missed in the accept path
+	// means the second client of a session silently gets a different protocol than it asked for.
+	void rearmSessionState();
 
 	unsigned int m_listenSock;   // SOCKET (unsigned) or ~0u if none
 	unsigned int m_clientSock;   // connected client or ~0u
@@ -66,6 +75,11 @@ private:
 	// TheSuperHackers @feature agentbridge protocol v1 handshake (M3)
 	Bool m_awaitingHello;    ///< true until the client's hello is validated
 	Int m_agentPlayerIndex;      // TheSuperHackers @feature agentbridge which player the agent controls; -1 = local player
+
+	// TheSuperHackers @feature agentbridge M13 observer mode + schema 3
+	Bool m_observerMode;   ///< observe only: applyActions rejects everything with "observer_mode"
+	Int  m_schema;         ///< schema negotiated in the hello (2 or 3); 2 stays byte-identical to M7
+	Bool m_terrainSent;    ///< static terrain raster travels once per session, not once per step
 
 	Int m_lastApplied;                        ///< actions injected by the last batch
 	std::vector<RejectedAction> m_lastRejected; ///< rejected actions of the last batch

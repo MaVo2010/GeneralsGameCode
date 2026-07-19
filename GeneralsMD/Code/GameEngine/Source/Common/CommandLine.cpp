@@ -445,6 +445,37 @@ Int parseAgentBridge(char *args[], int num)
 	}
 	return 1; // consumed flag only (keep default port)
 }
+
+// TheSuperHackers @feature agentbridge M13 observer mode: like -agentbridge, but the
+// bridge only observes — applyActions rejects every action with "observer_mode". That
+// is what makes replay playback safe to open (no injection path => nothing can diverge).
+// Argument shape: -agentbridge-observer [port] [playerIndex]. Both are optional and
+// positional; the port must come first, mirroring parseAgentBridge. playerIndex < 0
+// (the default) means "serialize every active playable player".
+Int parseAgentBridgeObserver(char *args[], int num)
+{
+	TheWritableGlobalData->m_agentBridge = TRUE;
+	TheWritableGlobalData->m_agentBridgeObserver = TRUE;
+	// same multi-instance bookkeeping as parseAgentBridge (M10)
+	rts::ClientInstance::setMultiInstance(TRUE);
+	rts::ClientInstance::skipPrimaryInstance();
+	Int consumed = 1;
+	if (num > consumed && args[consumed] != NULL && args[consumed][0] != '-')
+	{
+		Int port = atoi(args[consumed]);
+		if (port > 0 && port < 65536)
+		{
+			TheWritableGlobalData->m_agentBridgePort = port;
+			++consumed;
+			if (num > consumed && args[consumed] != NULL && args[consumed][0] != '-')
+			{
+				TheWritableGlobalData->m_agentBridgeObserverPlayer = atoi(args[consumed]);
+				++consumed;
+			}
+		}
+	}
+	return consumed;
+}
 #endif
 
 #if RTS_BUILD_AGENT_BRIDGE
@@ -509,6 +540,32 @@ Int parseAutoSkirmishOpponent(char *args[], int num)
 		return 3;
 	}
 	printf("-opponent requires <PlayerTemplate name> <easy|normal|hard>\n");
+	exit(1);
+	return 1;
+}
+
+// TheSuperHackers @feature agentbridge M13 bot-vs-bot: make slot 0 an AI as well, so a
+// skirmish can run with no human participant at all and both sides can be observed.
+// Mirrors parseAutoSkirmishOpponent's two-argument shape.
+Int parseAutoSkirmishSelfAI(char *args[], int num)
+{
+	if (num > 2 && args[1] != NULL && args[2] != NULL && args[1][0] != '-')
+	{
+		TheWritableGlobalData->m_autoSkirmishSelfAI = args[1];
+		if (stricmp(args[2], "easy") == 0)
+			TheWritableGlobalData->m_autoSkirmishSelfDifficulty = 0;
+		else if (stricmp(args[2], "normal") == 0)
+			TheWritableGlobalData->m_autoSkirmishSelfDifficulty = 1;
+		else if (stricmp(args[2], "hard") == 0)
+			TheWritableGlobalData->m_autoSkirmishSelfDifficulty = 2;
+		else
+		{
+			printf("Invalid difficulty \"%s\" (easy|normal|hard)\n", args[2]);
+			exit(1);
+		}
+		return 3;
+	}
+	printf("-selfai requires <PlayerTemplate name> <easy|normal|hard>\n");
 	exit(1);
 	return 1;
 }
@@ -1226,10 +1283,15 @@ static CommandLineParam paramsForStartup[] =
 #if RTS_BUILD_AGENT_BRIDGE
 	// TheSuperHackers @feature agentbridge Enables the AgentBridge external control server.
 	{ "-agentbridge", parseAgentBridge },
+	// TheSuperHackers @feature agentbridge M13 read-only observer (matching is
+	// exact-length, so this never shadows -agentbridge; see parseCommandLine).
+	{ "-agentbridge-observer", parseAgentBridgeObserver },
 	{ "-autoskirmish", parseAutoSkirmish },
 	{ "-skirmishseed", parseAutoSkirmishSeed },
 	{ "-faction", parseAutoSkirmishFaction },
 	{ "-opponent", parseAutoSkirmishOpponent },
+	// TheSuperHackers @feature agentbridge M13 bot-vs-bot data generation
+	{ "-selfai", parseAutoSkirmishSelfAI },
 #endif
 
 	// TheSuperHackers @feature helmutbuhler 13/04/2025

@@ -644,6 +644,10 @@ GlobalData::GlobalData()
 	m_autoSkirmishFaction = "FactionAmerica";
 	m_autoSkirmishOpponent = "FactionGLA";
 	m_autoSkirmishOpponentDifficulty = 0;
+	m_agentBridgeObserver = FALSE;
+	m_agentBridgeObserverPlayer = -1;
+	m_autoSkirmishSelfAI.clear();
+	m_autoSkirmishSelfDifficulty = 0;
 #endif
 	m_windowed = 0;
 	m_xResolution = DEFAULT_DISPLAY_WIDTH;

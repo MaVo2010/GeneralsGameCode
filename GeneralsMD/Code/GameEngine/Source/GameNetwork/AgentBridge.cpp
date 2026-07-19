@@ -38,7 +38,9 @@ AgentBridge::AgentBridge()
 	  m_framesSinceStep(0), m_awaitingFirstStep(TRUE),
 	  // TheSuperHackers @feature agentbridge protocol v1 handshake (M3)
 	  m_awaitingHello(TRUE),
-	  m_agentPlayerIndex(-1), m_lastApplied(0) {}
+	  m_agentPlayerIndex(-1), m_lastApplied(0),
+	  // TheSuperHackers @feature agentbridge M13 observer mode + schema 3
+	  m_observerMode(FALSE), m_schema(2), m_terrainSent(FALSE) {}
 
 AgentBridge::~AgentBridge() { closeClient();
 	if (m_listenSock != ~0u) { closesocket((SOCKET)m_listenSock); m_listenSock = ~0u; }
@@ -47,6 +49,12 @@ AgentBridge::~AgentBridge() { closeClient();
 void AgentBridge::init()
 {
 	if (!TheGlobalData->m_agentBridge) return;
+
+	// TheSuperHackers @feature agentbridge M13: observer configuration is startup config,
+	// not per-session state, so it is read once here and never touched by rearmSessionState().
+	m_observerMode = TheGlobalData->m_agentBridgeObserver;
+	if (m_observerMode)
+		m_agentPlayerIndex = TheGlobalData->m_agentBridgeObserverPlayer;
 
 	if (!s_winsockUp) {
 		WSADATA wsa; WORD ver = MAKEWORD(2,2);
@@ -68,12 +76,23 @@ void AgentBridge::init()
 	DEBUG_LOG(("AgentBridge: listening on 127.0.0.1:%d", TheGlobalData->m_agentBridgePort));
 }
 
-// TheSuperHackers @feature agentbridge re-arm the v1 hello whenever the connection state resets (M3)
-void AgentBridge::reset() {
+// TheSuperHackers @feature agentbridge M13: single definition of "a session starts now".
+// Called from reset() (engine/game reset) AND acceptClientIfWaiting() (a new client on a
+// still-running engine) — the two paths that used to carry duplicate, drift-prone lists.
+void AgentBridge::rearmSessionState() {
 	m_framesSinceStep = 0; m_awaitingFirstStep = TRUE; m_awaitingHello = TRUE;
 	// TheSuperHackers @feature agentbridge fresh sessions report a clean last_action (M4)
 	m_lastApplied = 0;
 	m_lastRejected.clear();
+	// TheSuperHackers @feature agentbridge M13: a new client renegotiates from scratch, and
+	// owes a fresh terrain block — leaking either across clients desynchronises the decoder.
+	m_schema = 2;
+	m_terrainSent = FALSE;
+}
+
+// TheSuperHackers @feature agentbridge re-arm the v1 hello whenever the connection state resets (M3)
+void AgentBridge::reset() {
+	rearmSessionState();
 	// TheSuperHackers @feature agentbridge M6C: a stale controlling flag must never
 	// survive an engine reset into the frame-pacer gate.
 	m_controlling = FALSE;
@@ -95,10 +114,7 @@ Bool AgentBridge::acceptClientIfWaiting() {
 		SOCKET c = accept((SOCKET)m_listenSock, NULL, NULL);
 		if (c != INVALID_SOCKET) { m_clientSock = (unsigned int)c;
 			// TheSuperHackers @feature agentbridge new connection must re-send the v1 hello (M3)
-			m_awaitingFirstStep = TRUE; m_framesSinceStep = 0; m_awaitingHello = TRUE;
-			// TheSuperHackers @feature agentbridge fresh sessions report a clean last_action (M4)
-			m_lastApplied = 0;
-			m_lastRejected.clear();
+			rearmSessionState();
 			DEBUG_LOG(("AgentBridge: client connected")); return TRUE; }
 	}
 	return FALSE;
@@ -255,13 +271,49 @@ static const char* victoryResultString(Player* agent)
 	return NULL;
 }
 
+// TheSuperHackers @feature agentbridge (M13) the combatants of the running game.
+// ThePlayerList is NOT just the players you see in the lobby: index 0 is the neutral
+// player (PlayerList.cpp:232-243), a FactionCivilian side survives prepareForMP_or_Skirmish
+// (SidesList.cpp:495-506), and a "ReplayObserver" side is appended unconditionally
+// (GameLogic.cpp:1524-1547). So indices are never safe to assume — isPlayableSide() is the
+// filter that leaves exactly the factions that are actually playing. It deliberately keeps
+// DEFEATED players (isPlayerActive() would drop them the moment they lose, which is precisely
+// when we still need to record who lost).
+static Bool isCombatant(Player* p)
+{
+	return p && p->isPlayableSide();
+}
+
+// TheSuperHackers @feature agentbridge (M13) the player an observation speaks for.
+// Normal mode is unchanged (local player). Observer mode takes the requested index, or
+// falls back to the first live combatant so that the top-level result/done stay meaningful.
+Player* AgentBridge::resolveAgentPlayer()
+{
+	if (!ThePlayerList)
+		return NULL;
+	if (m_agentPlayerIndex >= 0)
+		return ThePlayerList->getNthPlayer(m_agentPlayerIndex);
+	if (!m_observerMode)
+		return ThePlayerList->getLocalPlayer();
+	Player* fallback = NULL;
+	for (Int i = 0; i < ThePlayerList->getPlayerCount(); ++i)
+	{
+		Player* p = ThePlayerList->getNthPlayer(i);
+		if (!isCombatant(p))
+			continue;
+		if (p->isPlayerActive())
+			return p;
+		if (!fallback)
+			fallback = p;      // everyone defeated: still report someone rather than nobody
+	}
+	return fallback;
+}
+
 // M1: full observation — agent player's units, shroud-filtered enemy units, resources.
 std::string AgentBridge::buildObservation() {
 	// TheSuperHackers @feature agentbridge guard ThePlayerList: NULL -> agent stays NULL,
 	// self_units/visible_enemies both come out empty instead of a crash.
-	Player* agent = ThePlayerList
-		? ((m_agentPlayerIndex < 0) ? ThePlayerList->getLocalPlayer() : ThePlayerList->getNthPlayer(m_agentPlayerIndex))
-		: NULL;
+	Player* agent = resolveAgentPlayer();
 	Int viewer = agent ? agent->getPlayerIndex() : 0;
 
 	std::string out;
@@ -501,10 +553,26 @@ void AgentBridge::applyActions(const AsciiString& actionsJson)
 	m_lastApplied = 0;
 	m_lastRejected.clear();
 
-	Player* agent = NULL;
-	if (ThePlayerList)
-		agent = (m_agentPlayerIndex < 0) ? ThePlayerList->getLocalPlayer()
-		                                 : ThePlayerList->getNthPlayer(m_agentPlayerIndex);
+	// TheSuperHackers @feature agentbridge (M13) observer mode: no action ever reaches the
+	// message stream. This is not a policy but the load-bearing safety property — it is what
+	// lets the frame gate below admit replay playback at all. Rejections are still reported
+	// per action so the client sees WHY nothing happened, in the unchanged last_action shape.
+	if (m_observerMode)
+	{
+		AgentJsonValue observed;
+		const AgentJsonValue* list = NULL;
+		if (AgentJsonValue::parse(actionsJson.str(), observed) && observed.isObject())
+			list = observed.getMember("actions");
+		const size_t n = (list && list->isArray()) ? list->size() : 0;
+		for (size_t i = 0; i < n; ++i)
+		{
+			RejectedAction r = { (Int)i, "observer_mode" };
+			m_lastRejected.push_back(r);
+		}
+		return;
+	}
+
+	Player* agent = resolveAgentPlayer();
 	AgentJsonValue root;
 	if (!agent || !TheMessageStream || !AgentJsonValue::parse(actionsJson.str(), root) || !root.isObject())
 	{
@@ -562,8 +630,21 @@ Bool AgentBridge::preLogicSyncInternal()
 
 	// TheSuperHackers @feature agentbridge envelope: interactive offline game,
 	// never during replay playback (would diverge the CRC we verify against).
+	//
+	// TheSuperHackers @feature agentbridge (M13) observer mode lifts the replay exclusion.
+	// The original reason only ever covered INJECTION: applyActions() above returns without
+	// touching TheMessageStream while m_observerMode is set, so playback has nothing to
+	// diverge from. Reading is CRC-neutral by construction, and the -jobs replay check is
+	// the standing proof. Network games stay excluded — self-play is not in scope.
+	//
+	// Scope note (verified, M13): this only opens the WINDOWED replay path. Headless replay
+	// (-headless -replay) runs ReplaySimulation::simulateReplays() in Core/, which drives
+	// TheGameLogic->UPDATE() directly and never calls GameEngine::update() — so preLogicSync()
+	// is not reached there at all, and -jobs workers are not passed -agentbridge either.
+	// Observing a replay therefore means running it windowed.
+	const Bool replayOk = m_observerMode || (TheGameLogic && !TheGameLogic->isInReplayGame());
 	Bool gateOpen = TheGameLogic && TheGameLogic->isInInteractiveGame()
-		&& !TheGameLogic->isInReplayGame() && TheNetwork == NULL;
+		&& replayOk && TheNetwork == NULL;
 	if (!gateOpen)
 		return FALSE;      // M7: teardown bye now fires from onGameEnding()
 

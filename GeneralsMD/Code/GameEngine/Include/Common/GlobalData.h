@@ -132,6 +132,14 @@ public:
 	AsciiString m_autoSkirmishFaction;          ///< PlayerTemplate name for the agent player
 	AsciiString m_autoSkirmishOpponent;         ///< PlayerTemplate name for the AI opponent
 	Int         m_autoSkirmishOpponentDifficulty; ///< 0=easy 1=normal 2=hard -> SLOT_*_AI
+
+	// TheSuperHackers @feature agentbridge M13 observer mode: observe, never inject
+	Bool m_agentBridgeObserver;       ///< -agentbridge-observer: read-only, applyActions rejects everything
+	Int  m_agentBridgeObserverPlayer; ///< player index to serialize; -1 = every active playable player
+
+	// TheSuperHackers @feature agentbridge M13 bot-vs-bot: slot 0 may be an AI too
+	AsciiString m_autoSkirmishSelfAI;           ///< non-empty = slot 0 is an AI of this PlayerTemplate
+	Int         m_autoSkirmishSelfDifficulty;   ///< 0=easy 1=normal 2=hard -> SLOT_*_AI
 #endif
 
 	Bool m_windowed;
