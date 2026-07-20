@@ -175,7 +175,7 @@ Bool AgentBridge::sendJson(const AsciiString& json) {
 // C-style callback. `out` is std::string: AsciiString is capped at MAX_LEN (32767,
 // asserted) and wraps structurally past 64K (unsigned short m_numCharsAllocated) —
 // large armies would overflow it, so the accumulator must be unbounded.
-struct ObsBuilder { std::string* out; Int viewerIndex; Bool wantEnemies; Bool first; Int ownerIndex; Int schema; };
+struct ObsBuilder { std::string* out; Int viewerIndex; Bool wantEnemies; Bool first; Int ownerIndex; Int schema; Bool observerMode; };
 
 // TheSuperHackers @feature agentbridge (M13) raster resolution for terrain and shroud.
 // Deliberately coarse: terrain travels once per session, but the shroud raster goes out
@@ -353,8 +353,25 @@ static void appendUnitJson(Object* obj, void* ud) {
 	ObsBuilder* b = (ObsBuilder*)ud;
 	if (obj == NULL) return;
 	if (b->wantEnemies) {
-		ObjectShroudStatus s = obj->getShroudedStatus(b->viewerIndex);
-		if (s != OBJECTSHROUD_CLEAR && s != OBJECTSHROUD_PARTIAL_CLEAR) return;
+		// TheSuperHackers @feature agentbridge (M13) Object::getShroudedStatus() is declared
+		// const but forwards to PartitionData::getShroudedStatus(), which is NOT const: it
+		// writes m_shroudedness[playerIndex], m_everSeenByPlayer[playerIndex] and ghost-object
+		// snapshots. For the local player the simulation performs that query anyway, so the
+		// pre-M13 call site is harmless. The observer, however, asks on behalf of players the
+		// simulation never asks about, which populates memo state for indices that would
+		// otherwise stay untouched — and PartitionManager::unRegisterObject branches on
+		// wasSeenByAnyPlayers(), so an attached observer would change how object teardown is
+		// handled. That would break exactly the read-only property the replay gate rests on.
+		// The cell query below is genuinely const and costs one grid lookup.
+		if (b->observerMode) {
+			CellShroudStatus s = CELLSHROUD_SHROUDED;
+			if (ThePartitionManager && b->viewerIndex >= 0 && b->viewerIndex < MAX_PLAYER_COUNT)
+				s = ThePartitionManager->getShroudStatusForPlayer(b->viewerIndex, obj->getPosition());
+			if (s != CELLSHROUD_CLEAR) return;
+		} else {
+			ObjectShroudStatus s = obj->getShroudedStatus(b->viewerIndex);
+			if (s != OBJECTSHROUD_CLEAR && s != OBJECTSHROUD_PARTIAL_CLEAR) return;
+		}
 	}
 	const Coord3D* p = obj->getPosition();
 	Real hp = 0.0f, maxhp = 0.0f;
@@ -589,21 +606,32 @@ Player* AgentBridge::resolveAgentPlayer()
 	if (!ThePlayerList)
 		return NULL;
 	if (m_agentPlayerIndex >= 0)
-		return ThePlayerList->getNthPlayer(m_agentPlayerIndex);
+	{
+		Player* wanted = ThePlayerList->getNthPlayer(m_agentPlayerIndex);
+		// In observer mode an index that is not a combatant (index 0 is the neutral player,
+		// and a mistyped argument lands there) would otherwise yield empty perspectives and a
+		// result that never resolves — the episode then runs to its time cap and is discarded
+		// with nothing to show for it. Fall back loudly instead of failing silently.
+		if (!m_observerMode || isCombatant(wanted))
+			return wanted;
+		DEBUG_LOG(("AgentBridge: observer player index %d is not a combatant, using the first one",
+			m_agentPlayerIndex));
+	}
 	if (!m_observerMode)
 		return ThePlayerList->getLocalPlayer();
-	Player* fallback = NULL;
+	// TheSuperHackers @feature agentbridge (M13) deliberately NOT "the first ACTIVE combatant".
+	// isPlayerActive() goes false the moment a player is defeated, so preferring active players
+	// would silently hand the top-level player/result/done block to the other side exactly at
+	// the decisive moment — every decided game would then report result "win" no matter who won.
+	// The first combatant in list order is stable for the whole game, which is what a caller
+	// reading the top-level block across steps needs.
 	for (Int i = 0; i < ThePlayerList->getPlayerCount(); ++i)
 	{
 		Player* p = ThePlayerList->getNthPlayer(i);
-		if (!isCombatant(p))
-			continue;
-		if (p->isPlayerActive())
+		if (isCombatant(p))
 			return p;
-		if (!fallback)
-			fallback = p;      // everyone defeated: still report someone rather than nobody
 	}
-	return fallback;
+	return NULL;
 }
 
 // TheSuperHackers @feature agentbridge (M13) one player's view of the world: their own
@@ -613,7 +641,7 @@ void AgentBridge::appendPlayerViewJson(std::string& out, Player* p)
 {
 	const Int viewer = p ? p->getPlayerIndex() : 0;
 	out.append("\"self_units\":[");
-	if (p) { ObsBuilder sb = { &out, viewer, FALSE, TRUE, -1, m_schema }; p->iterateObjects(appendUnitJson, &sb); }
+	if (p) { ObsBuilder sb = { &out, viewer, FALSE, TRUE, -1, m_schema, m_observerMode }; p->iterateObjects(appendUnitJson, &sb); }
 	out.append("],\"visible_enemies\":[");
 	if (p && ThePlayerList) {
 		Bool firstEnemy = TRUE;
@@ -625,7 +653,7 @@ void AgentBridge::appendPlayerViewJson(std::string& out, Player* p)
 			// the agent player. API: Player::getRelationship(const Team*) against the candidate
 			// player's default team (same idiom as AISkirmishPlayer::acquireEnemy / WeaponSet / etc).
 			if (p->getRelationship(q->getDefaultTeam()) != ENEMIES) continue;
-			ObsBuilder eb = { &out, viewer, TRUE, firstEnemy, q->getPlayerIndex(), m_schema };
+			ObsBuilder eb = { &out, viewer, TRUE, firstEnemy, q->getPlayerIndex(), m_schema, m_observerMode };
 			q->iterateObjects(appendUnitJson, &eb);
 			firstEnemy = eb.first; // preserve comma state across players
 		}
@@ -734,7 +762,9 @@ std::string AgentBridge::buildObservation() {
 			{
 				Player* p = ThePlayerList->getNthPlayer(i);
 				if (!isCombatant(p)) continue;
-				if (m_agentPlayerIndex >= 0 && p->getPlayerIndex() != m_agentPlayerIndex) continue;
+				// A single requested perspective is pinned to the player resolveAgentPlayer()
+				// settled on, so a bad index cannot leave this array empty.
+				if (m_agentPlayerIndex >= 0 && p != agent) continue;
 				piece.format("%s{\"index\":%d,", firstView ? "" : ",", p->getPlayerIndex());
 				out.append(piece.str());
 				appendPlayerViewJson(out, p);
@@ -760,7 +790,11 @@ void AgentBridge::onGameEnding()
 		return;                                   // no client attached
 	if (!TheGameLogic || !TheGameLogic->isInGame())
 		return;                                   // save/load or non-game reset
-	Player* agent = ThePlayerList ? ThePlayerList->getLocalPlayer() : NULL;
+	// TheSuperHackers @feature agentbridge (M13) same player the observations spoke for. Using
+	// getLocalPlayer() here meant the farewell always carried result null in observer mode,
+	// because with -selfai the local player is the non-combatant ReplayObserver, which
+	// VictoryConditions excludes from its player list entirely.
+	Player* agent = resolveAgentPlayer();
 	const char* result = victoryResultString(agent);
 	AsciiString bye;
 	// M13: echoes the negotiated schema; for a schema-2 client this is the M7 message verbatim.
