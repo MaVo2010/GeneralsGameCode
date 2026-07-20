@@ -1263,9 +1263,14 @@ void MultiPlayerLoadScreen::init( GameInfo *game )
 	m_loadScreen->winHide(FALSE);
 	m_loadScreen->winBringToTop();
 	m_mapPreview = TheWindowManager->winGetWindowFromId( m_loadScreen,TheNameKeyGenerator->nameToKey( "MultiplayerLoadScreen.wnd:WinMapPreview"));
+	// TheSuperHackers @bugfix agentbridge (M13) GameInfo::getLocalSlotNum() returns -1 when no
+	// slot is a human player, and getSlot(-1) returns NULL — so this dereference faults. Retail
+	// cannot reach that state (a skirmish always has you in it), but an AI-only skirmish can,
+	// which is how bot-vs-bot observation games are set up. Fall through to the observer
+	// template this function already uses for slots without a faction.
 	GameSlot *lSlot = game->getSlot(game->getLocalSlotNum());
 	const PlayerTemplate* pt;
-	if (lSlot->getPlayerTemplate() >= 0)
+	if (lSlot && lSlot->getPlayerTemplate() >= 0)
 		pt = ThePlayerTemplateStore->getNthPlayerTemplate(lSlot->getPlayerTemplate());
 	else
 		pt = ThePlayerTemplateStore->findPlayerTemplate( TheNameKeyGenerator->nameToKey("FactionObserver") );

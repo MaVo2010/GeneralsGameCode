@@ -740,6 +740,19 @@ void GameEngine::init()
 					TheGlobalData->m_autoSkirmishFaction.str(), TheGlobalData->m_autoSkirmishOpponent.str());
 				exit(1);
 			}
+			// TheSuperHackers @feature agentbridge (M13) -selfai overrides slot 0's faction too,
+			// so bot-vs-bot can pit two arbitrary factions against each other.
+			const Bool selfIsAI = TheGlobalData->m_autoSkirmishSelfAI.isNotEmpty();
+			if (selfIsAI)
+			{
+				playerTpl = ThePlayerTemplateStore->getTemplateNumByName(TheGlobalData->m_autoSkirmishSelfAI);
+				if (playerTpl < 0)
+				{
+					printf("autoskirmish: unknown -selfai faction \"%s\"\n",
+						TheGlobalData->m_autoSkirmishSelfAI.str());
+					exit(1);
+				}
+			}
 
 			// allocate the skirmish game info if the menu never ran (mirror SkirmishGameOptionsMenu.cpp:1268)
 			if (TheSkirmishGameInfo == NULL)
@@ -754,8 +767,26 @@ void GameEngine::init()
 			TheSkirmishGameInfo->setMapSize(md->m_filesize);
 
 			// slot 0: the agent (human/local). Everything explicit so nothing is randomized.
+			// TheSuperHackers @feature agentbridge (M13) with -selfai this slot becomes an AI as
+			// well, leaving the skirmish with no human participant. That is a supported engine
+			// state: GameLogic always appends a "ReplayObserver" side with playerIsHuman TRUE
+			// (GameLogic.cpp:1524-1547), which PlayerList::newGame() then elects as the local
+			// player (PlayerList.cpp:155-159). The "map has no human player" panic path
+			// (PlayerList.cpp:167-181), which would convert an AI into a human and destroy its
+			// AI brain, is therefore never reached. setState() must precede the setters: it
+			// clears template/color/startPos unless the transition is AI->AI (GameInfo.cpp:198-211).
 			GameSlot human;
-			human.setState(SLOT_PLAYER, UnicodeString(L"Agent"));
+			if (selfIsAI)
+			{
+				SlotState selfState = SLOT_EASY_AI;
+				if (TheGlobalData->m_autoSkirmishSelfDifficulty == 1) selfState = SLOT_MED_AI;
+				else if (TheGlobalData->m_autoSkirmishSelfDifficulty == 2) selfState = SLOT_BRUTAL_AI;
+				human.setState(selfState);
+			}
+			else
+			{
+				human.setState(SLOT_PLAYER, UnicodeString(L"Agent"));
+			}
 			human.setPlayerTemplate(playerTpl);
 			human.setColor(0);
 			human.setStartPos(0);
