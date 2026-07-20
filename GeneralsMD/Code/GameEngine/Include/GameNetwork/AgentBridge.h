@@ -29,6 +29,12 @@ public:
 	// GameEngine::execute() to skip wall-clock pacing during agent-driven frames.
 	Bool isControllingClock() const { return m_controlling; }
 
+	// TheSuperHackers @feature agentbridge M13: read-only observer session. Read by the
+	// frame-pacer gate in GameEngine::execute() — an observer window exists only because
+	// headless replay playback never reaches the bridge, so nobody is watching it and
+	// there is nothing to pace for.
+	Bool isObserverMode() const { return m_observerMode; }
+
 	// Called from the GameEngine::update() hook once per frame; drives the
 	// synchronous step protocol (see AgentBridge.cpp). Returns TRUE if the bridge
 	// is controlling the clock this frame (caller then forces one logic frame,
