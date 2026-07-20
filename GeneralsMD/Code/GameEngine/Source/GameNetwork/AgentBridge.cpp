@@ -4,6 +4,10 @@
 
 #include "GameNetwork/AgentBridge.h"
 #include "Common/GlobalData.h"
+// TheSuperHackers @feature agentbridge M13: GameEngine::isGameHalted()/isTimeFrozen() are the
+// static predicates the logic-frame gate uses; the observation reports them so a client can see
+// whether the simulation is advancing at all.
+#include "Common/GameEngine.h"
 #include "GameLogic/GameLogic.h"
 // TheSuperHackers @feature agentbridge TheNetwork, to restrict the bridge to offline games
 #include "GameNetwork/NetworkDefs.h"
@@ -751,8 +755,17 @@ std::string AgentBridge::buildObservation() {
 		AsciiString piece;
 		// Wall-clock is forbidden in GameLogic; this is derived from the logic frame, which is
 		// exactly what makes it reproducible.
-		piece.format(",\"time_s\":%.1f",
-			TheGameLogic ? (Real)TheGameLogic->getFrame() / (Real)LOGICFRAMES_PER_SECOND : 0.0f);
+		//
+		// halted/time_frozen say whether the simulation is actually advancing. Without them a
+		// client cannot tell "N frames ran" from "the logic gate is shut", because
+		// m_framesSinceStep counts engine iterations rather than logic frames: a paused game
+		// keeps producing observations that look perfectly healthy apart from a frame number
+		// that never moves. Both are the very predicates GameEngine::update() gates on
+		// (GameEngine.cpp:1046-1061), so a stalled observer can name its own cause.
+		piece.format(",\"time_s\":%.1f,\"halted\":%s,\"time_frozen\":%s",
+			TheGameLogic ? (Real)TheGameLogic->getFrame() / (Real)LOGICFRAMES_PER_SECOND : 0.0f,
+			GameEngine::isGameHalted() ? "true" : "false",
+			GameEngine::isTimeFrozen() ? "true" : "false");
 		out.append(piece.str());
 
 		out.append(",\"players\":[");
