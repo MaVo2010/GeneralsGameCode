@@ -42,6 +42,10 @@ AgentBridge* TheAgentBridge = NULL;
 
 static Bool s_winsockUp = FALSE;
 
+// TheSuperHackers @feature agentbridge M13: defined further down with the science serializer;
+// declared here because rearmSessionState() below has to drop the cache at session start.
+static void forgetScienceNames();
+
 AgentBridge::AgentBridge()
 	: m_listenSock(~0u), m_clientSock(~0u), m_framesPerStep(5), m_controlling(FALSE),
 	  m_framesSinceStep(0), m_awaitingFirstStep(TRUE),
@@ -97,6 +101,7 @@ void AgentBridge::rearmSessionState() {
 	// owes a fresh terrain block — leaking either across clients desynchronises the decoder.
 	m_schema = 2;
 	m_terrainSent = FALSE;
+	forgetScienceNames();
 }
 
 // TheSuperHackers @feature agentbridge re-arm the v1 hello whenever the connection state resets (M3)
@@ -421,16 +426,28 @@ static const char* victoryResultString(Player* agent)
 // TheSuperHackers @feature agentbridge (M13) science names, built once. ScienceType is not a
 // dense enum — the values are NameKeys minted while parsing INI — so ownership can only be
 // probed name by name. friend_getScienceNames() allocates a vector per call, hence the latch.
+static std::vector<AsciiString> s_scienceNames;
+static Bool s_scienceNamesFilled = FALSE;
+
 static const std::vector<AsciiString>& agentScienceNames()
 {
-	static std::vector<AsciiString> s_names;
-	static Bool s_filled = FALSE;
-	if (!s_filled && TheScienceStore)
+	if (!s_scienceNamesFilled && TheScienceStore)
 	{
-		s_names = TheScienceStore->friend_getScienceNames();
-		s_filled = TRUE;
+		s_scienceNames = TheScienceStore->friend_getScienceNames();
+		s_scienceNamesFilled = TRUE;
 	}
-	return s_names;
+	return s_scienceNames;
+}
+
+// TheSuperHackers @feature agentbridge (M13) the science set is NOT process-constant:
+// ScienceStore::reset() drops entries that came from a map's own ini, so a second game in
+// the same process can have a different set. A cache that latched for the process lifetime
+// would keep probing sciences from the previous map and never see the current one — which
+// only shows up in attach mode, where several games share one process.
+static void forgetScienceNames()
+{
+	s_scienceNames.clear();
+	s_scienceNamesFilled = FALSE;
 }
 
 // TheSuperHackers @feature agentbridge (M13) collects a player's special powers across all
@@ -448,6 +465,12 @@ static void scanPowersJson(Object* obj, void* ud)
 		if (!obj->hasSpecialPower(type)) continue;
 		SpecialPowerModuleInterface* mod = obj->findSpecialPowerModuleInterface(type);
 		if (!mod) continue;
+		// findSpecialPowerModuleInterface only returns a module whose template matches the
+		// requested type, so a non-NULL module always has a template. Bail out anyway rather
+		// than testing tmpl further down: getReadyFrame() dereferences it unguarded, so a
+		// guard there would only look like it handled the case.
+		const SpecialPowerTemplate* tmpl = mod->getSpecialPowerTemplate();
+		if (!tmpl) continue;
 		s->seen[t] = TRUE;
 
 		// TheSuperHackers @feature agentbridge (M13) NEVER call SpecialPowerModule::isReady() or
@@ -456,8 +479,7 @@ static void scanPowersJson(Object* obj, void* ud)
 		// exists yet — a write hiding behind a const accessor, and a timer created on the wrong
 		// frame diverges the CRC. Shared powers are read through peekSpecialPowerReadyFrame()
 		// instead, which reports "no timer yet" rather than creating one; readiness is then null.
-		const SpecialPowerTemplate* tmpl = mod->getSpecialPowerTemplate();
-		const Bool shared = tmpl && tmpl->isSharedNSync();
+		const Bool shared = tmpl->isSharedNSync();
 		const UnsignedInt now = TheGameLogic ? TheGameLogic->getFrame() : 0;
 		Bool known = TRUE;
 		Bool ready = FALSE;

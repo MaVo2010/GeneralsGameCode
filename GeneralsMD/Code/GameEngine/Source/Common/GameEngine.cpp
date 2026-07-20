@@ -1152,7 +1152,16 @@ void GameEngine::execute()
 			// simulation stays frame-count-driven and byte-deterministic. Without a
 			// connected client (boot, between episodes) normal pacing keeps real time,
 			// which pins the reset frame exactly as before.
-			if (!(TheGlobalData->m_headless && TheAgentBridge && TheAgentBridge->isControllingClock()))
+			// M13 extends this to the windowed observer. Reading a replay has to run
+			// windowed at all — headless replay playback goes through ReplaySimulation in
+			// Core/, which never calls GameEngine::update() and therefore never ticks the
+			// bridge — so the window is an artefact of that limitation, not something a
+			// person is looking at. Pacing it to wall-clock made scoring a 20-minute replay
+			// take 20 minutes. The pacer decides WHEN frames run, never WHAT happens in
+			// them, which is the same argument M6 made for the headless uncap and verified
+			// with byte-identical golden traces plus a clean replay CRC.
+			if (!(TheAgentBridge && TheAgentBridge->isControllingClock()
+					&& (TheGlobalData->m_headless || TheAgentBridge->isObserverMode())))
 				TheFramePacer->update();
 #else
 			TheFramePacer->update();
