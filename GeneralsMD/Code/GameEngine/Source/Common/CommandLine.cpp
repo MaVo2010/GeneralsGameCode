@@ -428,6 +428,12 @@ Int parseHeadless(char *args[], int num)
 Int parseAgentBridge(char *args[], int num)
 {
 	TheWritableGlobalData->m_agentBridge = TRUE;
+	// TheSuperHackers @feature agentbridge M10: allow N agentbridge clients to run
+	// concurrently from one install (mirrors parseReplay). Client/window bookkeeping
+	// only, no GameLogic/CRC impact. Runs in parseCommandLineForStartup, before
+	// ClientInstance::initialize().
+	rts::ClientInstance::setMultiInstance(TRUE);
+	rts::ClientInstance::skipPrimaryInstance();
 	if (num > 1 && args[1] != NULL && args[1][0] != '-')
 	{
 		Int port = atoi(args[1]);
